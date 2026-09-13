@@ -1943,19 +1943,30 @@ struct WorkRecordPage: View {
                         onRevealHeading: { proxy.scrollTo("work.timeline.heading", anchor: .top) })
                         .padding(.top, compactViewport ? Space.s : Space.l)
                     DisclosureGroup("Task details") {
-                        VStack(alignment: .leading, spacing: Space.m) {
-                            Text(decision.explanation).workFont(.body).textSelection(.enabled)
-                            Text("Task ID: \(receipt.taskId)").workFont(.caption).textSelection(.enabled)
-                            DisclosureGroup("Task context and usage") {
-                                RecordDimensionsCard(receipt: receipt).padding(.top, Space.s)
-                            }
+                        VStack(alignment: .leading, spacing: Space.l) {
+                            // Receipt line items: the decision-relevant facts at
+                            // a glance, each carrying its own qualifier. Depth
+                            // lives one level down in the topics below.
+                            RecordSummaryStrip(receipt: receipt, summary: summary)
+                                .padding(.top, Space.m)
                             DisclosureGroup("Check history") {
                                 RecordChecksCard(evidence: receipt.dimensions.evidence, taskId: receipt.taskId)
                                     .padding(.top, Space.s)
                             }
+                            DisclosureGroup("Usage") {
+                                RecordDimensionsCard(receipt: receipt, included: [.actions, .cost], title: nil)
+                                    .padding(.top, Space.s)
+                            }
                             DisclosureGroup("Sessions") { sessionsSection.padding(.top, Space.s) }
-                            DisclosureGroup("Recording coverage") { sideColumn.padding(.top, Space.s) }
-                        }.padding(.top, Space.m)
+                            DisclosureGroup("Recording details") {
+                                VStack(alignment: .leading, spacing: Space.l) {
+                                    Text("Task ID: \(receipt.taskId)").workFont(.caption).textSelection(.enabled)
+                                    RecordDimensionsCard(receipt: receipt, included: [.task, .agents])
+                                        .padding(.top, Space.s)
+                                    sideColumn.padding(.top, Space.s)
+                                }
+                            }
+                        }.padding(.bottom, Space.s)
                     }
                     .workFont(.caption)
                     .padding(.top, Space.xl)

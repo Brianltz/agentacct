@@ -498,106 +498,61 @@ struct RecordSummaryStrip: View {
     let receipt: Receipt
     let summary: ReceiptSummary?
 
-    private struct Cell: Identifiable {
-        let id: String
-        let label: String
-        let value: String?
-        let qualifier: String?
-        let absent: String?
-    }
-
-    private var cells: [Cell] {
-        let actions = receipt.dimensions.actions
-        let cost = receipt.dimensions.cost
-
-        let actionKPI = receiptActionKPI(
-            receiptActionSynopsis(
-                counts: actions.toolCategoryCounts,
-                storedTotal: actions.toolCategoryTotal
-            )
-        )
-        let actionCell = Cell(
-            id: "actions",
-            label: "Tool calls",
-            value: actionKPI.value,
-            qualifier: actionKPI.qualifier,
-            absent: actionKPI.absent
-        )
-
-        let costCell: Cell
-        if let usd = cost.estimatedCostUsd {
-            var qualifier = costBasisLabel(cost.costBasis)
-            if cost.costComplete == false { qualifier += " · partial" }
-            // Weekly-plan share lives in its own "Weekly plan" receipt row now;
-            // don't duplicate it (in a second phrasing) on the cost KPI tile.
-            costCell = Cell(
-                id: "cost",
-                label: "Est. cost",
-                value: receiptCostDisplay(usd, complete: cost.costComplete, confidence: cost.costConfidence),
-                qualifier: qualifier,
-                absent: nil
-            )
-        } else {
-            costCell = Cell(id: "cost", label: "Est. cost", value: nil, qualifier: nil, absent: "no priced usage")
-        }
-
-        let elapsedCell: Cell
-        if let seconds = receipt.durationSeconds, seconds > 0 {
-            elapsedCell = Cell(id: "elapsed", label: "Elapsed", value: durationText(seconds), qualifier: nil, absent: nil)
-        } else {
-            elapsedCell = Cell(id: "elapsed", label: "Elapsed", value: nil, qualifier: nil, absent: "not recorded")
-        }
-
-        let sessionsCell: Cell
-        if let count = summary?.sessionCount ?? receipt.dimensions.task.boundary?.sessionCount {
-            let roots = receipt.sessions?.count ?? 0
-            sessionsCell = Cell(
-                id: "sessions",
-                label: "Sessions",
-                value: "\(count)",
-                qualifier: roots > 1 ? "\(roots) roots" : nil,
-                absent: nil
-            )
-        } else {
-            sessionsCell = Cell(id: "sessions", label: "Sessions", value: nil, qualifier: nil, absent: "not recorded")
-        }
-
-        return [actionCell, costCell, elapsedCell, sessionsCell]
+    private var presentation: RecordSummaryPresentation {
+        RecordSummaryPresentation(receipt: receipt, summary: summary)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 0) {
-                ForEach(Array(cells.enumerated()), id: \.element.id) { index, cell in
-                    if index > 0 {
-                        // Fixed-height vertical: an unbounded Rectangle would
-                        // stretch the strip to the page height.
-                        Rectangle().fill(Theme.hairline).frame(width: 1, height: 46)
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        CapsLabel(text: cell.label)
-                        if let value = cell.value {
-                            // Qualifier under the value: cells are narrow and a
-                            // basis word must never wrap the number itself.
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(value).workFont(.kpi).foregroundStyle(Theme.ink)
-                                if let qualifier = cell.qualifier {
-                                    Text(qualifier).workFont(.dataSmall).foregroundStyle(Theme.muted)
-                                        .lineLimit(1)
-                                }
-                            }
-                        } else {
-                            // Absence is a named state at value position — never "0".
-                            Text(cell.absent ?? "not recorded")
-                                .workFont(.body).foregroundStyle(Theme.muted)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, index > 0 ? Space.l : 0)
-                }
-            }
-            Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, Space.m)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 0) { row }
+            VStack(alignment: .leading, spacing: Space.m) { column }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Receipt summary")
+        .accessibilityIdentifier("receipt.summary")
+    }
+
+    private var row: some View {
+        ForEach(Array(presentation.items.enumerated()), id: \.element.id) { index, item in
+            if index > 0 {
+                // Fixed-height vertical: an unbounded Rectangle would stretch
+                // the strip to the page height.
+                Rectangle().fill(Theme.hairline).frame(width: 1, height: 46)
+            }
+            cell(item)
+                .padding(.leading, index > 0 ? Space.l : 0)
+        }
+    }
+
+    private var column: some View {
+        ForEach(presentation.items) { item in
+            cell(item)
+        }
+    }
+
+    private func cell(_ item: ReceiptSummaryItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            CapsLabel(text: item.label)
+            if let value = item.value {
+                // Qualifier under the value: cells are narrow and a basis word
+                // must never wrap the number itself.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(value).workFont(.kpi)
+                        .foregroundStyle(item.isWarning ? Theme.amber : Theme.ink)
+                    if let qualifier = item.qualifier {
+                        Text(qualifier).workFont(.dataSmall).foregroundStyle(Theme.muted)
+                            .lineLimit(1)
+                    }
+                }
+            } else {
+                // Absence is a named state at value position — never "0".
+                Text(item.absent ?? "not recorded")
+                    .workFont(.body).foregroundStyle(Theme.muted)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("receipt.summary.\(item.id)")
     }
 }
 
@@ -870,43 +825,64 @@ struct ReceiptActionsDigest: View {
 /// The receipt-dimensions ledger: one row per dimension — name, value,
 /// provenance chips, and the dimension's own gaps inline as named amber facts.
 struct RecordDimensionsCard: View {
+    /// Which parts of the captured ledger this instance shows. Callers split
+    /// the dimensions so every fact has exactly one home on the page.
+    enum Dimension: CaseIterable {
+        case task, agents, actions, cost, checks, outcome
+    }
+
     let receipt: Receipt
+    var included: Set<Dimension> = Set(Dimension.allCases)
+    var title: String? = "Task context"
+
+    private var ordered: [Dimension] { Dimension.allCases.filter(included.contains) }
 
     var body: some View {
         Card(padding: Space.xl) {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Task context").workFont(.titleCard).foregroundStyle(Theme.ink)
-                    .accessibilityAddTraits(.isHeader)
-                Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, Space.m)
-                dimensionRow("Task", taskSummary,
-                             provenance: receipt.dimensions.task.provenance,
-                             gaps: receipt.dimensions.task.gaps)
-                hairline
-                dimensionRow("Agents", actorsSummary,
-                             provenance: receipt.dimensions.actors.provenance,
-                             gaps: receipt.dimensions.actors.gaps)
-                hairline
-                actionsRow
-                hairline
-                dimensionRow("Cost", costSummary,
-                             provenance: receipt.dimensions.cost.provenance,
-                             gaps: receipt.dimensions.cost.gaps)
-                if let planShare = receipt.dimensions.cost.planShare {
-                    hairline
-                    dimensionRow("Weekly plan", planShare.rowSummary,
-                                 provenance: nil,
-                                 gaps: nil)
+                if let title {
+                    Text(title).workFont(.titleCard).foregroundStyle(Theme.ink)
+                        .accessibilityAddTraits(.isHeader)
+                    Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, Space.m)
                 }
-                hairline
-                dimensionRow("Checks", evidenceSummary,
-                             provenance: receipt.dimensions.evidence.provenance,
-                             gaps: receipt.dimensions.evidence.gaps)
-                hairline
-                dimensionRow("Outcome", outcomeSummary,
-                             provenance: receipt.dimensions.outcome.provenance,
-                             gaps: receipt.dimensions.outcome.gaps,
-                             verbatimValue: true)
+                ForEach(Array(ordered.enumerated()), id: \.offset) { index, dimension in
+                    if index > 0 { hairline }
+                    row(for: dimension)
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func row(for dimension: Dimension) -> some View {
+        switch dimension {
+        case .task:
+            dimensionRow("Task", taskSummary,
+                         provenance: receipt.dimensions.task.provenance,
+                         gaps: receipt.dimensions.task.gaps)
+        case .agents:
+            dimensionRow("Agents", actorsSummary,
+                         provenance: receipt.dimensions.actors.provenance,
+                         gaps: receipt.dimensions.actors.gaps)
+        case .actions:
+            actionsRow
+        case .cost:
+            dimensionRow("Cost", costSummary,
+                         provenance: receipt.dimensions.cost.provenance,
+                         gaps: receipt.dimensions.cost.gaps)
+            if let planShare = receipt.dimensions.cost.planShare {
+                hairline
+                dimensionRow("Weekly plan", planShare.rowSummary, provenance: nil, gaps: nil)
+            }
+        case .checks:
+            dimensionRow("Checks", evidenceSummary,
+                         provenance: receipt.dimensions.evidence.provenance,
+                         gaps: receipt.dimensions.evidence.gaps)
+        case .outcome:
+            dimensionRow("Outcome", outcomeSummary,
+                         provenance: receipt.dimensions.outcome.provenance,
+                         gaps: receipt.dimensions.outcome.gaps,
+                         verbatimValue: true)
         }
     }
 
