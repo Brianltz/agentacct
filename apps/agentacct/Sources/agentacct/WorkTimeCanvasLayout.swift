@@ -41,10 +41,11 @@ struct WorkTimeCanvasLayout {
 
     /// Upper bound on the extra time the viewport may show beyond the recorded
     /// domain. Cards are centered on their timestamps, so the earliest and
-    /// latest records need up to half a card of margin to be shown in full at
-    /// the extreme positions — without it, their edge half is unreachable.
-    /// Capping the margin keeps the maximum zoom-out bounded.
-    static let maximumEdgeRevealFraction = 0.15
+    /// latest records need half a card of margin to be shown in full at the
+    /// extreme positions — without it, their edge half is unreachable. The
+    /// bound keeps a restored or foreign window finite; zoom-out itself is
+    /// clamped to the recorded range, not to this margin.
+    static let maximumEdgeRevealFraction = 0.5
 
     init(
         records: [WorkTimelineRecord],
@@ -177,15 +178,18 @@ struct WorkTimeCanvasLayout {
         return .init(lower: lower, upper: upper)
     }
 
-    /// How far the viewport may pan beyond the recorded domain: a capped
-    /// fraction of the visible span. The same formula clamps the canvas and
-    /// the view, so a window produced by one is never re-clamped by the other.
-    /// At ordinary widths the cap exceeds half a card, so a card centered on
-    /// the first or last record still fits in full at the extreme.
-    static func edgeRevealTime(window: WorkTimelineInterval) -> Double {
+    /// How far the viewport may pan beyond the recorded domain: half a card
+    /// at the current scale, so a card centered on the first or last record
+    /// fits in full at the extreme. Falls back to the capped fraction when
+    /// the geometry is unknown. Half a card is at most half the viewport, so
+    /// the result is always inside `maximumEdgeRevealFraction`.
+    static func edgeRevealTime(window: WorkTimelineInterval, width: Double? = nil, cardWidth: Double? = nil) -> Double {
         let rawSpan = window.span
         let span = rawSpan.isFinite && rawSpan > 0 ? rawSpan : 1
-        return maximumEdgeRevealFraction * span
+        let fallback = maximumEdgeRevealFraction * span
+        guard let width, let cardWidth,
+              width.isFinite, width > 0, cardWidth.isFinite, cardWidth > 0 else { return fallback }
+        return min(cardWidth / 2 / width, maximumEdgeRevealFraction) * span
     }
 
     /// Constrain a requested window to the domain, preserving its span where
@@ -231,15 +235,21 @@ struct WorkTimeCanvasLayout {
 
     /// A factor greater than one zooms in. Keep the time at `anchorFraction`
     /// under the same viewport position unless a domain edge requires clamping.
+    /// The span clamps to the recorded range (`full`); the position clamps to
+    /// `positionDomain`, which may include the edge margin. That keeps the
+    /// maximum zoom-out at the recorded history while an overscrolled window
+    /// zooms without snapping back.
     static func zoomedWindow(
         _ window: WorkTimelineInterval,
         factor: Double,
         anchorFraction: Double,
         within full: WorkTimelineInterval,
+        positionDomain: WorkTimelineInterval? = nil,
         minimumSpan: Double = minimumVisibleSpan
     ) -> WorkTimelineInterval {
         let full = normalizedDomain(full)
-        let current = clampedWindow(window, to: full, minimumSpan: minimumSpan)
+        let positions = normalizedDomain(positionDomain ?? full)
+        let current = clampedWindow(window, to: positions, minimumSpan: minimumSpan)
         guard factor.isFinite, factor > 0 else { return current }
         let fraction = anchorFraction.isFinite ? min(max(anchorFraction, 0), 1) : 0.5
         let minimum = minimumSpan.isFinite && minimumSpan > 0 ? minimumSpan : 1
@@ -247,24 +257,27 @@ struct WorkTimeCanvasLayout {
         let newSpan = min(full.upper - full.lower, max(minimum, oldSpan / factor))
         let anchor = current.lower + oldSpan * fraction
         let lower = anchor - newSpan * fraction
-        return clampedWindow(.init(lower: lower, upper: lower + newSpan), to: full, minimumSpan: minimumSpan)
+        return clampedWindow(.init(lower: lower, upper: lower + newSpan), to: positions, minimumSpan: minimumSpan)
     }
 
     /// Zoom keeping an absolute anchor time fixed. Surfaces whose pointer
-    /// position is expressed against the full domain (the overview) convert to
-    /// the window-relative fraction here. An anchor outside the window clamps
-    /// to the nearest edge.
+    /// position is expressed against the pannable domain (the overview)
+    /// convert to the window-relative fraction here. An anchor outside the
+    /// window clamps to the nearest edge.
     static func zoomedWindow(
         _ window: WorkTimelineInterval,
         factor: Double,
         anchorTime: Double,
         within full: WorkTimelineInterval,
+        positionDomain: WorkTimelineInterval? = nil,
         minimumSpan: Double = minimumVisibleSpan
     ) -> WorkTimelineInterval {
-        let current = clampedWindow(window, to: full, minimumSpan: minimumSpan)
+        let positions = normalizedDomain(positionDomain ?? full)
+        let current = clampedWindow(window, to: positions, minimumSpan: minimumSpan)
         let span = current.upper - current.lower
         let fraction = anchorTime.isFinite && span > 0 ? (anchorTime - current.lower) / span : 0.5
-        return zoomedWindow(current, factor: factor, anchorFraction: fraction, within: full, minimumSpan: minimumSpan)
+        return zoomedWindow(current, factor: factor, anchorFraction: fraction,
+                            within: full, positionDomain: positions, minimumSpan: minimumSpan)
     }
 
     private struct Group {

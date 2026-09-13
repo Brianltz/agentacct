@@ -161,13 +161,17 @@ final class WorkTimeCanvasLayoutTests: XCTestCase {
         XCTAssertEqual(WorkTimeCanvasLayout.pannedWindow(window, by: .nan, within: full), window)
     }
 
-    func testEdgeRevealIsACappedFractionOfTheVisibleSpan() {
+    func testEdgeRevealIsHalfACardAndAlwaysBounded() {
         let window = WorkTimelineInterval(lower: 100, upper: 200)
-        // 15% of the span, independent of width or card size, so the canvas
-        // and the view clamp every produced window the same way.
+        // Half a 200pt card in a 1000pt viewport: 10% of the span.
+        XCTAssertEqual(WorkTimeCanvasLayout.edgeRevealTime(window: window, width: 1000, cardWidth: 200),
+                       10, accuracy: 0.000_001)
+        // Large text needs a larger margin: half of a 400pt card in 880pt.
+        XCTAssertEqual(WorkTimeCanvasLayout.edgeRevealTime(window: window, width: 880, cardWidth: 400),
+                       400.0 / 2 / 880 * 100, accuracy: 0.000_001)
+        // Unknown geometry falls back to the cap; degenerate spans stay finite.
         XCTAssertEqual(WorkTimeCanvasLayout.edgeRevealTime(window: window),
                        WorkTimeCanvasLayout.maximumEdgeRevealFraction * 100, accuracy: 0.000_001)
-        // Degenerate spans stay finite and positive.
         XCTAssertEqual(WorkTimeCanvasLayout.edgeRevealTime(window: .init(lower: 0, upper: .nan)),
                        WorkTimeCanvasLayout.maximumEdgeRevealFraction, accuracy: 0.000_001)
     }
@@ -192,7 +196,7 @@ final class WorkTimeCanvasLayoutTests: XCTestCase {
     func testPanningReachesTheEdgeRevealSoTheFirstCardFitsInFull() throws {
         let full = WorkTimelineInterval(lower: 100, upper: 200)
         let window = WorkTimelineInterval(lower: 100, upper: 130)
-        let reveal = WorkTimeCanvasLayout.edgeRevealTime(window: window)
+        let reveal = WorkTimeCanvasLayout.edgeRevealTime(window: window, width: 1000, cardWidth: 200)
         let domain = WorkTimeCanvasLayout.expandedDomain(full, by: reveal)
         let earliest = WorkTimeCanvasLayout.pannedWindow(window, by: -1_000, within: domain)
 
@@ -203,7 +207,25 @@ final class WorkTimeCanvasLayoutTests: XCTestCase {
             window: earliest, width: 1000, height: 420)
         let item = try XCTUnwrap(layout.visibleCards(in: 1000).first)
         XCTAssertGreaterThanOrEqual(item.frame.minX, 0, "the first card is fully inside at the extreme")
-        XCTAssertEqual(item.frame.minX, 50, accuracy: 0.000_001)
+        XCTAssertEqual(item.frame.minX, 0, accuracy: 0.000_001)
+    }
+
+    func testZoomKeepsTheDataSpanBoundAndPreservesAnOverscrolledPosition() {
+        let full = WorkTimelineInterval(lower: 100, upper: 200)
+        let position = WorkTimeCanvasLayout.expandedDomain(full, by: 20)
+        let window = WorkTimelineInterval(lower: 80, upper: 100)
+
+        // Zooming out stops at the recorded span but keeps the margin position.
+        let zoomedOut = WorkTimeCanvasLayout.zoomedWindow(window, factor: 0.001,
+            anchorFraction: 1, within: full, positionDomain: position)
+        XCTAssertEqual(zoomedOut.upper - zoomedOut.lower, full.span, accuracy: 0.000_001)
+        XCTAssertLessThan(zoomedOut.lower, full.lower, "the overscrolled position survives zooming")
+
+        // Zooming in at the margin edge does not snap back into the range.
+        let zoomedIn = WorkTimeCanvasLayout.zoomedWindow(window, factor: 2,
+            anchorFraction: 0, within: full, positionDomain: position)
+        XCTAssertEqual(zoomedIn.lower, 80, accuracy: 0.000_001)
+        XCTAssertEqual(zoomedIn.upper - zoomedIn.lower, 10, accuracy: 0.000_001)
     }
 
     func testZoomKeepsPointerTimeAnchoredUntilDomainEdgeRequiresClamping() {

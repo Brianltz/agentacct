@@ -24,6 +24,7 @@ struct WorkTimeCanvas: View {
     @State private var lastTriggerID: String?
     @State private var hoveredID: String?
     @State private var dragBaseWindow: WorkTimelineInterval?
+    @State private var measuredWidth: Double = 0
     @FocusState private var focusedItem: String?
 
     private var scale: Double {
@@ -34,7 +35,7 @@ struct WorkTimeCanvas: View {
     var body: some View {
         VStack(spacing: 8) {
             if dynamicTypeSize.isAccessibilitySize {
-                WorkTimeWindowScroller(records: records, full: full, window: window, onWindow: onWindow)
+                WorkTimeWindowScroller(records: records, full: full, window: window, domain: scrollerDomain, onWindow: onWindow)
             }
             GeometryReader { geometry in
                 let width = Double(geometry.size.width)
@@ -47,9 +48,9 @@ struct WorkTimeCanvas: View {
                 // positions show a card centered on the first/last record in
                 // full; placement itself stays anchored to absolute time.
                 let edgeDomain = WorkTimeCanvasLayout.expandedDomain(full,
-                    by: WorkTimeCanvasLayout.edgeRevealTime(window: window))
+                    by: WorkTimeCanvasLayout.edgeRevealTime(window: window, width: width, cardWidth: layout.cardWidth))
                 let tickMarkings = WorkTimelineTimeAxis.ticks(in: window, width: width, minimumSpacing: 140 * scale)
-                input(items: visibleCards, window: window, domain: edgeDomain, width: width) {
+                input(items: visibleCards, window: window, full: full, domain: edgeDomain, width: width) {
                     ZStack(alignment: .topLeading) {
                     Theme.canvas
                     drawing(layout: layout, items: visibleCards, crossing: crossingSpans, ticks: tickMarkings.times, width: width, indexedRecords: indexedRecords).allowsHitTesting(false)
@@ -82,14 +83,31 @@ struct WorkTimeCanvas: View {
             .accessibilityLabel("Activity timeline")
             .accessibilityIdentifier("work.timeline.canvas")
             if !dynamicTypeSize.isAccessibilitySize {
-                WorkTimeWindowScroller(records: records, full: full, window: window, onWindow: onWindow)
+                WorkTimeWindowScroller(records: records, full: full, window: window, domain: scrollerDomain, onWindow: onWindow)
             }
         }
         .background(Theme.canvas, in: RoundedRectangle(cornerRadius: Metrics.radius))
         .overlay(RoundedRectangle(cornerRadius: Metrics.radius).strokeBorder(Theme.hairline))
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: WorkTimeCanvasWidthKey.self, value: proxy.size.width)
+        })
+        .onPreferenceChange(WorkTimeCanvasWidthKey.self) { width in
+            guard width.isFinite, width > 0, abs(width - measuredWidth) > 0.5 else { return }
+            measuredWidth = width
+        }
     }
 
-    private func input<Content: View>(items: [WorkTimeCanvasLayout.Item], window: WorkTimelineInterval, domain: WorkTimelineInterval, width: Double, @ViewBuilder content: () -> Content) -> some View {
+    /// The overview maps the same pannable domain as the canvas — including
+    /// the edge margin — so the pill reflects the true scrollable range and
+    /// neither surface clamps the other's windows.
+    private var scrollerDomain: WorkTimelineInterval {
+        let width = measuredWidth > 0 ? measuredWidth : nil
+        let card = width.map { min(200 * scale, $0) }
+        return WorkTimeCanvasLayout.expandedDomain(full,
+            by: WorkTimeCanvasLayout.edgeRevealTime(window: window, width: width, cardWidth: card))
+    }
+
+    private func input<Content: View>(items: [WorkTimeCanvasLayout.Item], window: WorkTimelineInterval, full: WorkTimelineInterval, domain: WorkTimelineInterval, width: Double, @ViewBuilder content: () -> Content) -> some View {
         WorkTimeCanvasInput(interactiveRegions: items.map(\.frame),
             onPan: { pixels in
                 // Keyboard and accessibility increments resolve against the
@@ -106,7 +124,8 @@ struct WorkTimeCanvas: View {
                     by: -cumulativePixels / max(width, 1) * base.span, within: domain))
             },
             onZoom: { factor, anchor in
-                onWindow(WorkTimeCanvasLayout.zoomedWindow(window, factor: factor, anchorFraction: anchor, within: domain))
+                onWindow(WorkTimeCanvasLayout.zoomedWindow(window, factor: factor, anchorFraction: anchor,
+                    within: full, positionDomain: domain))
             },
             onEdge: { latest in
                 onWindow(WorkTimeCanvasLayout.pannedWindow(window,
@@ -273,6 +292,11 @@ struct WorkTimeCanvas: View {
     }
 }
 
+private struct WorkTimeCanvasWidthKey: PreferenceKey {
+    static var defaultValue: Double = 0
+    static func reduce(value: inout Double, nextValue: () -> Double) { value = max(value, nextValue()) }
+}
+
 /// Distinct recorded spans in a crossing cluster; many members commonly share
 /// identical extents, and each still draws once.
 private struct CrossingSpanKey: Hashable {
@@ -289,26 +313,23 @@ private struct WorkTimeWindowScroller: View {
     let records: [WorkTimelineRecord]
     let full: WorkTimelineInterval
     let window: WorkTimelineInterval
+    let domain: WorkTimelineInterval
     let onWindow: (WorkTimelineInterval) -> Void
     @State private var dragStart: WorkTimelineInterval?
 
     var body: some View {
         GeometryReader { geometry in
             let width = max(geometry.size.width - 40, 1)
-            let left = full.fraction(window.lower) * width
-            let right = full.fraction(window.upper) * width
-            // The overview pans and zooms within the same bounded edge margin
-            // as the canvas, so neither surface re-clamps the other's window.
-            let domain = WorkTimeCanvasLayout.expandedDomain(full,
-                by: WorkTimeCanvasLayout.edgeRevealTime(window: window))
+            let left = domain.fraction(window.lower) * width
+            let right = domain.fraction(window.upper) * width
             WorkTimeCanvasInput(interactiveRegions: [CGRect(x: 0, y: 0, width: geometry.size.width, height: 32)],
                 onPan: { pixels in
-                    onWindow(WorkTimeCanvasLayout.pannedWindow(window, by: -pixels / width * full.span, within: domain))
+                    onWindow(WorkTimeCanvasLayout.pannedWindow(window, by: -pixels / width * domain.span, within: domain))
                 }, onZoom: { factor, anchor in
-                    // The pointer position is a fraction of the full domain,
-                    // not of the visible window.
+                    // The pointer position is a fraction of the domain, not of
+                    // the visible window.
                     onWindow(WorkTimeCanvasLayout.zoomedWindow(window, factor: factor,
-                        anchorTime: full.lower + full.span * anchor, within: domain))
+                        anchorTime: domain.lower + domain.span * anchor, within: full, positionDomain: domain))
                 }, accessibilityIdentifier: "work.timeline.overview.navigation") {
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 4).fill(Theme.hairline.opacity(0.5))
@@ -316,7 +337,7 @@ private struct WorkTimeWindowScroller: View {
                     var bins = [Int](repeating: 0, count: max(1, Int(size.width / 5)))
                     for record in records {
                         guard let time = WorkTimelineProjection.validTime(record.start) else { continue }
-                        let bucket = full.fraction(time) * Double(bins.count)
+                        let bucket = domain.fraction(time) * Double(bins.count)
                         guard bucket.isFinite else { continue }
                         bins[min(max(Int(bucket), 0), bins.count - 1)] += 1
                     }
@@ -337,7 +358,7 @@ private struct WorkTimeWindowScroller: View {
                     .frame(width: max(right - left, 2)).offset(x: left)
                     .simultaneousGesture(DragGesture(minimumDistance: 2, coordinateSpace: .named("work-time-overview")).onChanged { value in
                         let start = dragStart ?? window; dragStart = start
-                        onWindow(WorkTimeCanvasLayout.pannedWindow(start, by: value.translation.width / width * full.span, within: full))
+                        onWindow(WorkTimeCanvasLayout.pannedWindow(start, by: value.translation.width / width * domain.span, within: domain))
                     }.onEnded { _ in dragStart = nil })
                     .onHover { ($0 ? NSCursor.openHand : NSCursor.arrow).set() }
                     .accessibilityRepresentation { accessibleRangeControl(isStart: nil) }
