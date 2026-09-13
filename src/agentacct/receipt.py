@@ -266,15 +266,9 @@ def tool_names_preview(
 # --- Evidence axis ------------------------------------------------------------
 
 def _check_source(check: Mapping[str, Any]) -> str:
-    # Trust ``source_type`` only. The raw ``source`` is agent-authored and would
-    # let an MCP check forge the CI label; see task_outcome._check_independence,
-    # which is the load-bearing version of this same rule for the evidence tier.
-    source_type = _text(check.get("source_type")).lower()
-    if source_type == "client_hook":
-        return SOURCE_HOOK
-    if source_type in {"ci", "external", "provider"}:
-        return SOURCE_CI
-    return SOURCE_MCP
+    from .task_timeline import check_source
+
+    return check_source(check)
 
 
 def _project_checks(task: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -608,7 +602,7 @@ def plan_share_headline(plan_share: Mapping[str, Any] | None) -> str:
     if state == "calibrating":
         return "calibrating — not enough 7-day history yet"
     if state == "never":
-        return "undefined for this client"
+        return "not applicable for this client"
     return "—"
 
 
@@ -1052,15 +1046,9 @@ def _sessions_block(task: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     primary = _mapping(task.get("primary_root"))
     primary_key = (_text(primary.get("client")), _text(primary.get("client_session_id")))
-    # Only roots carry a ``client_session_title``; a subagent's is null, so the
-    # drill-down showed a raw session id until you expanded it. Recover a name
-    # from the subagent's FIRST recorded step so the row is legible up front.
-    step_title_by_session: dict[str, str] = {}
-    for item in _items(task):
-        session_id = _text(item.get("client_session_id"))
-        title = _text(item.get("title") or item.get("objective") or item.get("summary"))
-        if session_id and title and session_id not in step_title_by_session:
-            step_title_by_session[session_id] = title
+    from .task_timeline import session_display_titles
+
+    titles = session_display_titles(task)
     sessions_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
     raw_sessions = task.get("sessions") if isinstance(task.get("sessions"), list) else []
     for session in raw_sessions:
@@ -1092,11 +1080,7 @@ def _sessions_block(task: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "client_session_id": key[1],
                     "session_kind": _text(session.get("session_kind")) or None,
                     "role": "root" if key == root_key else "subagent",
-                    "title": (
-                        _text(session.get("client_session_title"))
-                        or step_title_by_session.get(key[1])
-                        or None
-                    ),
+                    "title": titles.get(key) or None,
                     "project": _text(session.get("project")) or None,
                     "last_activity_at": _number(session.get("last_activity_at")) or None,
                 }

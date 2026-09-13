@@ -97,10 +97,21 @@ final class DashboardStore {
     /// SwiftUI `.task`, while deterministic rendering cannot wait on network
     /// work); a drill row reads it as a fallback so its steps render in a snapshot.
     private(set) var preloadedSessions: [String: V1SessionDetail] = [:]
+    private(set) var nativeReviewRevision = 0
+
+    /// Explicit native review input only. This cannot replace live app data.
+    func applyNativeReviewSessions(_ details: [V1SessionDetail], receipt: Receipt? = nil) {
+        guard SnapshotMode.enabled, SnapshotMode.interactiveFixture else { return }
+        preloadedSessions = Dictionary(details.map { ("\($0.session.client)::\($0.session.clientSessionId)", $0) }, uniquingKeysWith: { _, latest in latest })
+        if let receipt { self.receipt = receipt }
+        nativeReviewRevision += 1
+    }
     private(set) var errorText: String?
     /// Source/watcher health from /v1/ingestion (the Sources pane).
     private(set) var ingestion: V1IngestionSnapshot?
     private(set) var ingestionError: String?
+    private(set) var ingestionLastUpdated: Date?
+    private(set) var isRefreshingIngestion = false
     private(set) var isRefreshing = false
     private(set) var isLoadingReceipts = false
     private(set) var lastUpdated: Date?
@@ -121,10 +132,39 @@ final class DashboardStore {
     /// failed fetch can't leave the old data labeled with the new range.
     @ObservationIgnored private var usageDaysGeneration = 0
     @ObservationIgnored private var attentionGeneration = LatestRequestGeneration()
+    @ObservationIgnored private var setupCaptureCursors = SetupCaptureCursorState()
 
-    @ObservationIgnored private let client = GlanceClient()
+    @ObservationIgnored private let client: GlanceClient
+    let savedWork: SavedWorkSnapshot?
+    var isOfflineSnapshot: Bool { savedWork != nil }
+    var receiptSavedAt: Date? {
+        guard let taskID = receipt?.taskId else { return nil }
+        return savedWork?.entries["/v1/receipt?task=\(Self.queryValue(taskID))"]?.receivedAt
+    }
+    func sessionSavedAt(client: String, sessionID: String) -> Date? {
+        savedWork?.entries["/v1/session?client=\(Self.queryValue(client))&session_id=\(Self.queryValue(sessionID))"]?.receivedAt
+    }
+    static func queryValue(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
+    }
 
-    init() {}
+    init() { client = GlanceClient(); savedWork = nil }
+
+    init(savedWork: SavedWorkSnapshot, taskID: String? = nil) {
+        self.savedWork = savedWork
+        client = GlanceClient(savedWork: savedWork)
+        if let tasks: ReceiptTasksPayload = try? savedWork.value("/v1/tasks?limit=200") {
+            publishReceiptTasks(tasks)
+        }
+        if let taskID { receipt = try? savedWork.value("/v1/receipt?task=\(Self.queryValue(taskID))") }
+        receiptListLastUpdated = savedWork.collectionDate
+        lastUpdated = savedWork.collectionDate
+        for entry in savedWork.entries.values where entry.path.hasPrefix("/v1/session?") {
+            if let session = try? JSONDecoder().decode(V1SessionDetail.self, from: entry.data) {
+                preloadedSessions["\(session.session.client)::\(session.session.clientSessionId)"] = session
+            }
+        }
+    }
 
     /// Design-review tooling: populate the same state the daemon endpoints
     /// would, without network access or a developer's local account data.
@@ -133,6 +173,8 @@ final class DashboardStore {
         workState: SnapshotWorkStoreState = .populated,
         usageState: SnapshotUsageStoreState? = nil
     ) {
+        client = GlanceClient()
+        savedWork = nil
         planClients = fixture.plan.clients
         usage = usageState?.summary ?? fixture.usage
         usageDays = usageState?.days ?? 7
@@ -221,6 +263,7 @@ final class DashboardStore {
     }
 
     func refresh() async {
+        guard !isOfflineSnapshot else { return }
         guard !isRefreshing else { return }
         isRefreshing = true
         let receiptListGeneration = beginReceiptListLoad()
@@ -238,7 +281,7 @@ final class DashboardStore {
         async let attentionRequest: V1AttentionPayload = client.getAuthed("/v1/attention?limit=5")
         async let planRequest: V1PlanPayload = client.getAuthed("/v1/plan?days=\(days)")
         async let usageRequest: UsageSummary = client.getLocal("/usage/summary?days=\(days)")
-        async let ingestionRequest: V1IngestionPayload = client.getAuthed("/v1/ingestion")
+        async let ingestionRefresh: Void = refreshIngestion()
 
         var tasksSucceeded = false
         do {
@@ -286,24 +329,7 @@ final class DashboardStore {
             }
         }
 
-        do {
-            let payload = try await ingestionRequest
-            ingestion = payload.ingestion
-            ingestionError = nil
-        } catch GlanceClientError.http(404) {
-            // An older daemon without the route: a named state, not an error toast.
-            if !Task.isCancelled {
-                ingestionError = "this daemon predates /v1/ingestion"
-            }
-        } catch GlanceClientError.noDiscovery(_) {
-            if !Task.isCancelled {
-                ingestionError = "daemon not running (no discovery file) — start it with `agentacct start`"
-            }
-        } catch {
-            if !requestWasCancelled(error, taskIsCancelled: Task.isCancelled) {
-                ingestionError = "source health fetch failed: \(error.localizedDescription)"
-            }
-        }
+        _ = await ingestionRefresh
 
         do {
             let (plan, summary) = try await (planRequest, usageRequest)
@@ -322,6 +348,34 @@ final class DashboardStore {
             guard rangeGeneration == usageDaysGeneration,
                   !requestWasCancelled(error, taskIsCancelled: Task.isCancelled) else { return }
             errorText = "daemon fetch failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Sources retries only its own endpoint (upstream PR #158). A cancelled
+    /// window refresh leaves retained source health and its timestamp intact.
+    func refreshIngestion() async {
+        guard !isOfflineSnapshot, !SnapshotMode.enabled, !isRefreshingIngestion else { return }
+        isRefreshingIngestion = true
+        defer { isRefreshingIngestion = false }
+        do {
+            let payload: V1IngestionPayload = try await client.getAuthed("/v1/ingestion")
+            try Task.checkCancellation()
+            ingestion = payload.ingestion
+            ingestionError = nil
+            ingestionLastUpdated = Date()
+        } catch GlanceClientError.http(404) {
+            // An older daemon without the route: a named state, not an error toast.
+            if !Task.isCancelled {
+                ingestionError = "this daemon predates /v1/ingestion"
+            }
+        } catch GlanceClientError.noDiscovery(_) {
+            if !Task.isCancelled {
+                ingestionError = "daemon not running (no discovery file) — start it with `agentacct start`"
+            }
+        } catch {
+            if !requestWasCancelled(error, taskIsCancelled: Task.isCancelled) {
+                ingestionError = "source health fetch failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -348,6 +402,7 @@ final class DashboardStore {
     /// paginated Receipt list. Used after a human disposition changes whether
     /// a finding or blocker still demands review.
     func fetchAttention() async {
+        guard !isOfflineSnapshot else { return }
         let generation = attentionGeneration.begin()
         isLoadingMoreAttention = false
         do {
@@ -438,7 +493,7 @@ final class DashboardStore {
         receiptTasksTruncated = payload.truncated
         receiptAttention = payload.attention
         receiptListError = nil
-        receiptListLastUpdated = Date()
+        receiptListLastUpdated = savedWork?.collectionDate ?? Date()
     }
 
     func fetchReceipt(taskId: String) async {
@@ -454,7 +509,7 @@ final class DashboardStore {
             if generation == receiptGeneration { receiptLoadingTaskId = nil }
         }
         do {
-            let encoded = taskId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? taskId
+            let encoded = Self.queryValue(taskId)
             let payload: Receipt = try await client.getAuthed("/v1/receipt?task=\(encoded)")
             guard !Task.isCancelled, generation == receiptGeneration else { return }
             receipt = payload
@@ -480,14 +535,73 @@ final class DashboardStore {
         }
     }
 
+    /// Fetch the canonical task timeline; only a completely assembled snapshot
+    /// is persisted for offline use. Live cursors are never saved as history.
+    func loadTimeline(taskID: String, previous: TaskTimelinePage?) async throws -> TaskTimelinePage {
+        let path = "/v1/task-timeline?task=\(Self.queryValue(taskID))"
+        if isOfflineSnapshot { return try await client.getAuthed(path) }
+        let started = Date()
+        let page = try await TaskTimelineLoader.load(taskID: taskID, previous: previous) { cursor in
+            try await self.client.getAuthed(path + "&limit=500" + (cursor.map { "&cursor=\(Self.queryValue($0))" } ?? ""))
+        }
+        try Task.checkCancellation()
+        if let store = try? GlanceClient.storeDir(), let data = try? JSONEncoder().encode(page) {
+            await SavedWorkCache.shared.record(path: path, data: data, store: store, requestStartedAt: started)
+        }
+        return page
+    }
+
     /// Load one session for a Receipt drill row. Each row owns its result, so
     /// several expanded sessions can remain visible at the same time.
     func loadSession(client clientName: String, sessionId: String) async throws -> V1SessionDetail {
-        let encodedClient = clientName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? clientName
-        let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? sessionId
+        let encodedClient = Self.queryValue(clientName)
+        let encodedSession = Self.queryValue(sessionId)
         return try await client.getAuthed(
             "/v1/session?client=\(encodedClient)&session_id=\(encodedSession)"
         )
+    }
+
+    /// Equatable exact relations let the window enrich a capture link when a
+    /// later tasks response or same-task receipt adds the matching session.
+    var setupCaptureTaskAssociations: [SetupCaptureTaskAssociation] {
+        SetupCaptureTaskResolver.associations(tasks: receiptTasks, receipts: receipt.map { [$0] } ?? [])
+    }
+
+    func taskID(for capture: SetupCaptureConfirmation) -> String? {
+        SetupCaptureTaskResolver.taskID(for: capture, associations: setupCaptureTaskAssociations)
+    }
+
+    /// Bounded fresh-capture lookup during first setup. Never treats a recent
+    /// session, successful request, or imported token count as capture proof.
+    func findSetupCapture(client target: SetupClient, after boundary: Date) async throws -> SetupCaptureConfirmation? {
+        guard !isOfflineSnapshot, !SnapshotMode.enabled else { return nil }
+        let store = try GlanceClient.storeDir().standardizedFileURL.resolvingSymlinksInPath()
+        let ticket = setupCaptureCursors.begin(store: store, client: target, boundary: boundary)
+        func verifyStore() throws {
+            guard try GlanceClient.storeDir().standardizedFileURL.resolvingSymlinksInPath() == store else {
+                throw SetupCaptureLookupError.storeChanged
+            }
+        }
+        let result = try await SetupCaptureLookup.scan(client: target, after: boundary, cursor: ticket.cursor,
+            loadPage: { limit, offset in
+                try verifyStore()
+                let page: V1SessionsPayload = try await self.client.getAuthed(
+                    "/v1/sessions?client=\(Self.queryValue(target.rawValue))&roots_only=false&limit=\(limit)&offset=\(offset)"
+                )
+                try verifyStore()
+                return page
+            },
+            loadDetail: { sessionID in
+                try verifyStore()
+                let detail = try await self.loadSession(client: target.rawValue, sessionId: sessionID)
+                try verifyStore()
+                return detail
+            })
+        try Task.checkCancellation()
+        try verifyStore()
+        setupCaptureCursors.finish(ticket, nextCursor: result.nextCursor)
+        guard let confirmation = result.capture else { return nil }
+        return taskID(for: confirmation).map { confirmation.associatingTask($0) } ?? confirmation
     }
 
     /// Record one human attention disposition (finding or blocker) and refresh
@@ -502,6 +616,7 @@ final class DashboardStore {
         blockedEventId: String? = nil,
         refreshTaskId: String? = nil
     ) async throws {
+        guard !isOfflineSnapshot else { throw SavedWorkError.readOnly }
         var body: [String: Any] = [
             "kind": kind,
             "action": action,
@@ -548,6 +663,7 @@ final class DashboardStore {
     /// The range label only flips once both payloads have landed, and only the
     /// newest in-flight switch is allowed to write.
     func setUsageDays(_ days: Int) async {
+        guard !isOfflineSnapshot else { return }
         guard days != usageDays else { return }
         usageDaysGeneration += 1
         let generation = usageDaysGeneration
@@ -585,6 +701,13 @@ final class AppSelection {
     var taskId: String?
     var pane: MainPane = .dashboard
     let workBrowse = WorkBrowseState()
+    var workReturnFocus = WorkTimelineFocusRestoration()
+
+    func prepareWorkReturnFocus() {
+        guard pane == .work, let taskId else { return }
+        workReturnFocus.prepare(taskID: taskId)
+    }
+
     var workSort: WorkSort {
         get { workBrowse.sort }
         set { workBrowse.sort = newValue }

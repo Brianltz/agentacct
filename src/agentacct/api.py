@@ -344,7 +344,9 @@ def _fmt_time(value: Any) -> str:
         timestamp = float(value)
     except (OverflowError, TypeError, ValueError):
         return ""
-    if not math.isfinite(timestamp) or timestamp <= 0:
+    # Apply the UTC domain bound before local-time conversion: west-of-UTC
+    # timezones can otherwise render the year-10000 boundary as year 9999.
+    if not math.isfinite(timestamp) or not 0 < timestamp < 253_402_300_800:
         return ""
     # Out-of-range guard on the RAW epoch, before any local-timezone
     # conversion: 253_402_300_800 is the Unix epoch for 10000-01-01 UTC, one
@@ -2972,10 +2974,11 @@ def create_local_api_app(
         roots_only: bool = Query(True),
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
+        client: str | None = Query(None, min_length=1),
     ) -> dict[str, Any]:
         """The versioned session list for native shells (see agentacct.v1_sessions).
 
-        ``roots_only`` filters BEFORE the recency slice (the "12 root
+        ``client`` and ``roots_only`` filter BEFORE the recency slice (the "12 root
         sessions" fix), ``offset``/``limit`` walk the filtered population, and
         the envelope disclose every cut (totals + ``truncated``). Rows carry
         per-session weekly-plan shares with children folded into their root
@@ -2991,7 +2994,7 @@ def create_local_api_app(
                 _derived_work_ledger(events, fingerprint=fingerprint), events
             ),
         )
-        return slice_sessions_payload(view, roots_only=roots_only, limit=limit, offset=offset)
+        return slice_sessions_payload(view, roots_only=roots_only, limit=limit, offset=offset, client=client)
 
     @app.get("/v1/session")
     def v1_session_detail(
@@ -3299,6 +3302,32 @@ def create_local_api_app(
             "limit": limit,
             "truncated": offset + len(items) < total,
         }
+
+    from .task_timeline import TimelineCursorError, TimelineSnapshotCache, build_timeline_events
+
+    timeline_snapshots = TimelineSnapshotCache()
+
+    @app.get("/v1/task-timeline")
+    def v1_task_timeline(
+        request: Request,
+        task: str = Query(..., min_length=1),
+        limit: int = Query(200, ge=1, le=500),
+        cursor: str | None = Query(None, min_length=1, max_length=128),
+    ) -> dict[str, Any]:
+        """Pages from one immutable, task-scoped timeline snapshot. Expired cursors return 409."""
+        _require_v1_token(request)
+        if cursor is not None:
+            try:
+                return timeline_snapshots.page(task, limit=limit, cursor=cursor)
+            except TimelineCursorError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        projection = _v1_task_projection()
+        selected = next((row for row in _visible_tasks(projection)
+                         if str(row.get("public_task_id")) == task), None)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="unknown task for this store")
+        return timeline_snapshots.page(task, limit=limit,
+            events=build_timeline_events(selected))
 
     @app.get("/v1/receipt")
     def v1_receipt(
