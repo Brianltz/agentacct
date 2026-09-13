@@ -602,7 +602,7 @@ def plan_share_headline(plan_share: Mapping[str, Any] | None) -> str:
     if state == "calibrating":
         return "calibrating — not enough 7-day history yet"
     if state == "never":
-        return "undefined for this client"
+        return "not applicable for this client"
     return "—"
 
 

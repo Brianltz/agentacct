@@ -937,7 +937,7 @@ struct ReceiptPlanShare: Decodable {
         }
         switch calibrationState {
         case "calibrating": return "calibrating — not enough 7-day history yet"
-        case "never": return "undefined for this client"
+        case "never": return "not applicable for this client"
         default: return "—"
         }
     }
