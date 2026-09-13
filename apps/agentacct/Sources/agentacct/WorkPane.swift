@@ -1937,33 +1937,38 @@ struct WorkRecordPage: View {
                         BlockerCallout(blocker: blocker, taskId: receipt.taskId)
                             .padding(.top, Space.s)
                     }
+                    // The receipt's totals sit with the header, above the
+                    // evidence: verdict, then line items, then history.
+                    RecordSummaryStrip(receipt: receipt, summary: summary)
+                        .padding(Space.l)
+                        .background(Theme.card, in: RoundedRectangle(cornerRadius: Metrics.radius))
+                        .overlay(RoundedRectangle(cornerRadius: Metrics.radius).strokeBorder(Theme.cardLine))
+                        .padding(.top, compactViewport ? Space.s : Space.l)
                     WorkTimelineView(receipt: receipt,
                         onRevealInspector: { proxy.scrollTo("work.timeline.inspector", anchor: .top) },
                         onRevealRecords: { proxy.scrollTo("work.timeline.records", anchor: .top) },
                         onRevealHeading: { proxy.scrollTo("work.timeline.heading", anchor: .top) })
-                        .padding(.top, compactViewport ? Space.s : Space.l)
+                        .padding(.top, Space.m)
                     DisclosureGroup("Task details") {
-                        VStack(alignment: .leading, spacing: Space.l) {
-                            // Receipt line items: the decision-relevant facts at
-                            // a glance, each carrying its own qualifier. Depth
-                            // lives one level down in the topics below.
-                            RecordSummaryStrip(receipt: receipt, summary: summary)
-                                .padding(.top, Space.m)
-                            VStack(alignment: .leading, spacing: 0) {
-                                ReceiptTopic(title: "Usage", hint: usageHint) {
-                                    RecordDimensionsCard(receipt: receipt, included: [.actions, .cost])
-                                }
-                                topicDivider
-                                ReceiptTopic(title: "Sessions", hint: sessionsHint) {
-                                    sessionsIndex
-                                }
-                                topicDivider
-                                ReceiptTopic(title: "Recording details", hint: recordingHint,
-                                             help: receipt.axes.orthogonalityNote) {
-                                    recordingDetails
-                                }
+                        VStack(alignment: .leading, spacing: 0) {
+                            ReceiptTopic(title: "Usage", hint: usageHint,
+                                         help: "Counts describe captured tool calls, not progress or success. Related paths are recorded associations, not modified files. Current receipts have no ordered action ledger, so captured call counts cannot be linked to results or timing.") {
+                                RecordDimensionsCard(receipt: receipt, included: [.actions, .cost],
+                                                     showsProvenance: false, compactDigest: true)
                             }
-                        }.padding(.bottom, Space.s)
+                            topicDivider
+                            ReceiptTopic(title: "Sessions", hint: sessionsHint) {
+                                sessionsIndex
+                            }
+                            topicDivider
+                            ReceiptTopic(title: "Recording details", hint: recordingHint,
+                                         help: receipt.axes.orthogonalityNote) {
+                                recordingDetails
+                            }
+                        }
+                        .padding(.vertical, Space.s)
+                        .background(Theme.card, in: RoundedRectangle(cornerRadius: Metrics.radius))
+                        .overlay(RoundedRectangle(cornerRadius: Metrics.radius).strokeBorder(Theme.cardLine))
                     }
                     .workFont(.caption)
                     .padding(.top, Space.xl)
@@ -2132,23 +2137,25 @@ struct WorkRecordPage: View {
     @ViewBuilder
     private var sessionsIndex: some View {
         if let groups = receipt.sessions, !groups.isEmpty {
-            VStack(alignment: .leading, spacing: Space.s) {
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(groups) { group in
+                    let members = group.members
                     if groups.count > 1 {
-                        HStack(spacing: 6) {
-                            Chip(text: group.role == "continuation" ? "continuation" : "primary",
-                                 tint: group.role == "continuation" ? Theme.muted : Theme.accent)
+                        HStack(spacing: Space.s) {
+                            CapsLabel(text: group.role == "continuation" ? "Continuation" : "Primary")
                             if let count = group.supportingCount, count > 0 {
                                 Text("\(count) subagent\(count == 1 ? "" : "s")")
                                     .workFont(.dataSmall).foregroundStyle(Theme.muted)
                             }
                         }
+                        .padding(.top, Space.s).padding(.bottom, 2)
                     }
-                    ForEach(group.members) { member in
+                    ForEach(Array(members.enumerated()), id: \.element.id) { index, member in
                         SessionIndexRow(
                             member: member,
                             preloadedStepCount: dashboard.preloadedSessions["\(member.client)::\(member.clientSessionId)"]?.steps.count
                         )
+                        if index < members.count - 1 { topicDivider }
                     }
                 }
             }
@@ -2164,9 +2171,8 @@ struct WorkRecordPage: View {
     /// coverage, sources and gaps. Each fact appears once on the page.
     private var recordingDetails: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Task ID: \(receipt.taskId)").workFont(.caption).textSelection(.enabled)
-                .padding(.bottom, Space.s)
-            RecordDimensionsCard(receipt: receipt, included: [.task, .agents])
+            RecordDimensionsCard(receipt: receipt, included: [.task, .agents],
+                                 showsProvenance: false, showsGaps: false)
             receiptFactRow("Coverage") {
                 let presentation = ReceiptCoveragePresentation(evidence: receipt.axes.evidenceStrength)
                 VStack(alignment: .leading, spacing: 4) {
@@ -2213,13 +2219,18 @@ struct WorkRecordPage: View {
                     }
                 }
             }
+            receiptFactRow("Task ID") {
+                Text(receipt.taskId).workFont(.dataSmall).foregroundStyle(Theme.muted)
+                    .textSelection(.enabled)
+            }
         }
     }
 
     private func receiptFactRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .top, spacing: Space.l) {
-            Text(label).workFont(.rowLabel).foregroundStyle(Theme.ink)
-                .frame(width: 128, alignment: .leading)
+            CapsLabel(text: label)
+                .frame(width: 104, alignment: .leading)
+                .padding(.top, 3)
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -2289,21 +2300,30 @@ private struct SessionIndexRow: View {
         return "\(member.client) · \(sessionDistinguishingID(member.clientSessionId))"
     }
 
+    /// One quiet meta line: recording client, kind (only when it qualifies the
+    /// row), project when it differs from the task context, and step count
+    /// when the session is already loaded.
+    private var meta: String {
+        var parts = [member.client]
+        if member.role == "subagent" { parts.append(member.sessionKind ?? "subagent") }
+        if let project = member.project, !project.isEmpty { parts.append("project \(project)") }
+        if let count = preloadedStepCount { parts.append("\(count) step\(count == 1 ? "" : "s")") }
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s) {
-            Text(label).workFont(.body).foregroundStyle(Theme.ink)
-                .lineLimit(1)
-            if member.role == "subagent" {
-                Chip(text: member.sessionKind ?? "subagent", tint: Theme.muted)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).workFont(.body).foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                Text(meta).workFont(.caption).foregroundStyle(Theme.muted)
+                    .lineLimit(1)
             }
             Spacer(minLength: Space.s)
-            if let count = preloadedStepCount {
-                Text("\(count) step\(count == 1 ? "" : "s")")
-                    .workFont(.dataSmall).foregroundStyle(Theme.muted)
-            }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label), \(meta)")
     }
 }
 

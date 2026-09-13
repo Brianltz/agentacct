@@ -540,8 +540,10 @@ struct RecordSummaryStrip: View {
                     Text(value).workFont(.kpi)
                         .foregroundStyle(item.isWarning ? Theme.amber : Theme.ink)
                     if let qualifier = item.qualifier {
+                        // The qualifier may wrap; only the value itself stays
+                        // on one line so a basis word never breaks the number.
                         Text(qualifier).workFont(.dataSmall).foregroundStyle(Theme.muted)
-                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             } else {
@@ -567,6 +569,9 @@ struct ReceiptActionsDigest: View {
     let relatedPathCount: Int?
     let provenance: [String]?
     let gaps: [String]?
+    /// Topic use: keep the facts, drop the explanatory copy — the definitions
+    /// live in the topic's help instead of under every bar.
+    var compact = false
 
     // The app's fixed type ramp keeps dense dashboard geometry stable. This
     // focused digest still has to honor accessibility text sizes, so its four
@@ -668,17 +673,21 @@ struct ReceiptActionsDigest: View {
                     .font(captionSemiboldFont)
                     .foregroundStyle(Theme.ink)
                 Spacer(minLength: Space.s)
-                Text("Shared scale")
-                    .font(dataSmallFont)
-                    .foregroundStyle(Theme.muted)
+                if !compact {
+                    Text("Shared scale")
+                        .font(dataSmallFont)
+                        .foregroundStyle(Theme.muted)
+                }
             }
             .padding(.top, Space.xs)
             .accessibilityHidden(true)
 
-            Text("Counts describe captured tool calls, not progress or success.")
-                .font(captionFont)
-                .foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
+            if !compact {
+                Text("Counts describe captured tool calls, not progress or success.")
+                    .font(captionFont)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             ForEach(synopsis.metrics) { metric in
                 actionDistributionRow(metric)
@@ -713,10 +722,12 @@ struct ReceiptActionsDigest: View {
                     .foregroundStyle(Theme.ink)
                     .monospacedDigit()
             }
-            Text(metric.detail)
-                .font(captionFont)
-                .foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
+            if !compact {
+                Text(metric.detail)
+                    .font(captionFont)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             GeometryReader { proxy in
                 Rectangle()
                     .fill(Theme.accent)
@@ -730,8 +741,8 @@ struct ReceiptActionsDigest: View {
         .accessibilityLabel(metric.label)
         .accessibilityValue(
             synopsis.shareDenominator.map {
-                "\(metric.count) of \($0). \(metric.detail)"
-            } ?? "\(metric.count). \(metric.detail)"
+                compact ? "\(metric.count) of \($0)" : "\(metric.count) of \($0). \(metric.detail)"
+            } ?? (compact ? "\(metric.count)" : "\(metric.count). \(metric.detail)")
         )
     }
 
@@ -833,6 +844,12 @@ struct RecordDimensionsCard: View {
 
     let receipt: Receipt
     var included: Set<Dimension> = Set(Dimension.allCases)
+    /// Whole-task facts (Sources, Gaps) already own these; scoped topic rows
+    /// hide the per-dimension repeats.
+    var showsProvenance = true
+    var showsGaps = true
+    /// Topic use drops the digest's explanatory copy into help.
+    var compactDigest = false
 
     private var ordered: [Dimension] { Dimension.allCases.filter(included.contains) }
 
@@ -890,8 +907,9 @@ struct RecordDimensionsCard: View {
         verbatimValue: Bool = false
     ) -> some View {
         HStack(alignment: .top, spacing: Space.l) {
-            Text(name).workFont(.rowLabel).foregroundStyle(Theme.ink)
-                .frame(width: 128, alignment: .leading)
+            CapsLabel(text: name)
+                .frame(width: 104, alignment: .leading)
+                .padding(.top, 3)
             VStack(alignment: .leading, spacing: 6) {
                 if verbatimValue {
                     // Outcome statements quote agent text — never parse as markdown.
@@ -901,18 +919,20 @@ struct RecordDimensionsCard: View {
                     Text(summary).workFont(.body).foregroundStyle(Theme.ink)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if let provenance, !provenance.isEmpty {
+                if showsProvenance, let provenance, !provenance.isEmpty {
                     HStack(spacing: 6) {
                         ForEach(provenance, id: \.self) { source in
                             ProvenanceChip(text: source)
                         }
                     }
                 }
-                ForEach(gaps ?? [], id: \.self) { gap in
-                    // A dimension's own blind spot, named where the value lives.
-                    HStack(spacing: 6) {
-                        EvidencePip(shape: .hollow, tint: Theme.amber)
-                        Text(gap).workFont(.caption).foregroundStyle(Theme.amber)
+                if showsGaps {
+                    ForEach(gaps ?? [], id: \.self) { gap in
+                        // A dimension's own blind spot, named where the value lives.
+                        HStack(spacing: 6) {
+                            EvidencePip(shape: .hollow, tint: Theme.amber)
+                            Text(gap).workFont(.caption).foregroundStyle(Theme.amber)
+                        }
                     }
                 }
             }
@@ -933,7 +953,8 @@ struct RecordDimensionsCard: View {
             ),
             relatedPathCount: dim.touchedFileCount,
             provenance: dim.provenance,
-            gaps: dim.gaps
+            gaps: dim.gaps,
+            compact: compactDigest
         )
     }
 
@@ -952,7 +973,9 @@ struct RecordDimensionsCard: View {
         var parts: [String] = []
         if let agent = dim.primaryAgent { parts.append(agent) }
         if let models = dim.models, !models.isEmpty { parts.append(models.joined(separator: ", ")) }
-        if let subagents = dim.subagentSessionCount, subagents > 0 { parts.append("\(subagents) subagents") }
+        if let subagents = dim.subagentSessionCount, subagents > 0 {
+            parts.append("\(subagents) subagent\(subagents == 1 ? "" : "s")")
+        }
         return parts.isEmpty ? "no agent recorded" : parts.joined(separator: " · ")
     }
 
