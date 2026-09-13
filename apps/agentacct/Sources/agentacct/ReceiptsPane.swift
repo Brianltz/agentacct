@@ -598,16 +598,30 @@ struct ReceiptActionsDigest: View {
     }
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: Space.l) {
-                actionsLabel.frame(width: 128, alignment: .leading)
-                digestContent
-            }
-            .frame(width: 620, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .leading, spacing: Space.m) {
-                actionsLabel
-                digestContent
+        Group {
+            if compact {
+                // Work page: a caps label matching the sibling rows, and a
+                // full-width content column so the 100% bar spans its track.
+                HStack(alignment: .top, spacing: Space.l) {
+                    CapsLabel(text: "Tool calls")
+                        .frame(width: 104, alignment: .leading)
+                        .padding(.top, 3)
+                        .accessibilityHidden(true)
+                    digestContent
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: Space.l) {
+                        actionsLabel.frame(width: 128, alignment: .leading)
+                        digestContent
+                    }
+                    .frame(width: 620, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: Space.m) {
+                        actionsLabel
+                        digestContent
+                    }
+                }
             }
         }
         .padding(.vertical, Space.m)
@@ -637,8 +651,17 @@ struct ReceiptActionsDigest: View {
             }
             if !synopsis.metrics.isEmpty {
                 if synopsis.canShowDistribution {
-                    actionDistribution
+                    // Work page: one 100% stacked bar + a wrapping legend, with
+                    // the full itemized list one click away. The multi-row
+                    // shared-scale chart stays the full-receipt presentation.
+                    if compact {
+                        stackedBar
+                    } else {
+                        actionDistribution
+                    }
                 } else {
+                    // Not a reconciled partition: keep exact counts, never draw
+                    // a proportional bar against a missing/conflicting total.
                     Text("Captured tool-call types")
                         .font(captionSemiboldFont)
                         .foregroundStyle(Theme.ink)
@@ -653,17 +676,175 @@ struct ReceiptActionsDigest: View {
             if !scope.isEmpty {
                 metadataLine(label: "Related paths", value: scope)
             }
-            if !sourceText.isEmpty {
+            // On the Work page these facts already have a home elsewhere: action
+            // provenance in the Recording section's Sources row, and the capture
+            // boundary in this section's own help. Repeating them would duplicate
+            // facts, so the compact digest omits them.
+            if !compact, !sourceText.isEmpty {
                 metadataLine(label: "Action sources", value: sourceText)
             }
-            if let boundary = synopsis.captureBoundary {
+            if !compact, let boundary = synopsis.captureBoundary {
                 metadataLine(label: "Detail", value: boundary)
             }
-            ForEach(Array((gaps ?? []).enumerated()), id: \.offset) { _, gap in
+            ForEach(Array((compact ? [] : (gaps ?? [])).enumerated()), id: \.offset) { _, gap in
                 noticeLine(prefix: "Evidence gap", text: gap, tone: Theme.amber)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: compact stacked bar (Work page)
+
+    /// One displayed slice of the 100% bar and its legend entry.
+    private struct BarSegment: Identifiable {
+        let id: String
+        let label: String
+        let count: Int
+        let fraction: Double
+        let color: Color
+        let tooltip: String
+        let axValue: String
+    }
+
+    /// Accent, tinted by share rank — the bar's only colors. "Other" is muted.
+    private var accentRamp: [Double] { [1.0, 0.82, 0.66, 0.52, 0.4, 0.32] }
+
+    /// The displayed segments: every type when few, else the five largest plus
+    /// a muted "Other" carrying the exact remainder. Callers guarantee a
+    /// reconciled positive denominator (`canShowDistribution`).
+    private var barSegments: [BarSegment] {
+        guard let denom = synopsis.shareDenominator, denom > 0 else { return [] }
+        func pct(_ count: Int) -> String {
+            (Double(count) / Double(denom)).formatted(.percent.precision(.fractionLength(0...1)))
+        }
+        var displayed: [(label: String, count: Int, detail: String, key: String)]
+        var otherCount = 0
+        if synopsis.metrics.count > 6 {
+            let topKeys = Set(synopsis.metrics.sorted { $0.count > $1.count }.prefix(5).map(\.key))
+            displayed = []
+            for metric in synopsis.metrics {
+                if topKeys.contains(metric.key) {
+                    displayed.append((metric.label, metric.count, metric.detail, metric.key))
+                } else {
+                    otherCount += metric.count
+                }
+            }
+        } else {
+            displayed = synopsis.metrics.map { ($0.label, $0.count, $0.detail, $0.key) }
+        }
+        // Rank by count (desc) to pick each slice's accent opacity.
+        let ranking = displayed.map(\.count).enumerated()
+            .sorted { $0.element > $1.element }.map(\.offset)
+        var opacityForIndex: [Int: Double] = [:]
+        for (rank, index) in ranking.enumerated() {
+            opacityForIndex[index] = accentRamp[min(rank, accentRamp.count - 1)]
+        }
+        var segments = displayed.enumerated().map { index, item in
+            BarSegment(
+                id: item.key,
+                label: item.label,
+                count: item.count,
+                fraction: Double(item.count) / Double(denom),
+                color: Theme.accent.opacity(opacityForIndex[index] ?? accentRamp.last!),
+                tooltip: "\(item.label) · \(item.count) call\(item.count == 1 ? "" : "s") · \(pct(item.count)) — \(item.detail)",
+                axValue: "\(item.count) call\(item.count == 1 ? "" : "s"), \(pct(item.count)). \(item.detail)"
+            )
+        }
+        if otherCount > 0 {
+            segments.append(BarSegment(
+                id: "__other__",
+                label: "Other",
+                count: otherCount,
+                fraction: Double(otherCount) / Double(denom),
+                color: Theme.muted.opacity(0.55),
+                tooltip: "Other · \(otherCount) call\(otherCount == 1 ? "" : "s") · \(pct(otherCount)) — remaining captured tool-call types",
+                axValue: "\(otherCount) call\(otherCount == 1 ? "" : "s"), \(pct(otherCount)). Remaining captured tool-call types"
+            ))
+        }
+        return segments
+    }
+
+    private var stackedBar: some View {
+        let segments = barSegments
+        return VStack(alignment: .leading, spacing: Space.s) {
+            GeometryReader { proxy in
+                HStack(spacing: 0) {
+                    ForEach(segments) { segment in
+                        segment.color
+                            .frame(width: max(proxy.size.width * segment.fraction, segment.fraction > 0 ? 2 : 0))
+                            .help(segment.tooltip)
+                            .accessibilityElement()
+                            .accessibilityLabel(segment.label)
+                            .accessibilityValue(segment.axValue)
+                    }
+                }
+            }
+            .frame(height: 6)
+            .clipShape(RoundedRectangle(cornerRadius: 2))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Tool calls by type")
+
+            legend(segments)
+
+            // The full itemized list — with exact percents — is one click away
+            // only when the bar collapsed types into "Other".
+            if synopsis.metrics.count > 6 {
+                OverflowDisclosure(
+                    label: "Show all \(synopsis.metrics.count) tool types",
+                    identifier: "work.overflow.tool-types"
+                ) {
+                    fullTypeList
+                }
+            }
+        }
+    }
+
+    /// A swatch + label + exact count per displayed slice; wraps at any width.
+    private func legend(_ segments: [BarSegment]) -> some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 116), spacing: Space.m, alignment: .leading)],
+            alignment: .leading,
+            spacing: 6
+        ) {
+            ForEach(segments) { segment in
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(segment.color)
+                        .frame(width: 8, height: 8)
+                    Text(segment.label).font(dataSmallFont).foregroundStyle(Theme.muted)
+                    Text("\(segment.count)").font(dataSmallSemiboldFont)
+                        .foregroundStyle(Theme.ink).monospacedDigit()
+                    Spacer(minLength: 0)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(segment.label)
+                .accessibilityValue(segment.axValue)
+            }
+        }
+    }
+
+    /// Every captured type with its exact count and share — the overflow body.
+    private var fullTypeList: some View {
+        let denom = synopsis.shareDenominator ?? 1
+        return VStack(alignment: .leading, spacing: Space.s) {
+            ForEach(synopsis.metrics) { metric in
+                let percent = (Double(metric.count) / Double(denom))
+                    .formatted(.percent.precision(.fractionLength(0...1)))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s) {
+                        Text(metric.label).font(captionSemiboldFont).foregroundStyle(Theme.ink)
+                        Spacer(minLength: Space.s)
+                        Text("\(metric.count) · \(percent)").font(dataSmallSemiboldFont)
+                            .foregroundStyle(Theme.ink).monospacedDigit()
+                    }
+                    Text(metric.detail).font(captionFont).foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(metric.label)
+                .accessibilityValue("\(metric.count), \(percent). \(metric.detail)")
+            }
+        }
     }
 
     private var actionDistribution: some View {

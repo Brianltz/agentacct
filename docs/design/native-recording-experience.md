@@ -42,9 +42,12 @@ back to the group. The region takes its natural height in the page flow, so
 long content scrolls with the page instead of a nested panel. Close dismisses
 the region; Escape also dismisses the group chooser. Reading size flows
 through the ordinary view tree, so text and controls scale together. Supporting
-records can be inspected even when their timestamps are outside the current window. Task details has separate categories instead of expanding every
-ledger at once. Full identifiers remain available, and real parent-section or
-later-result links remain contextual to the selected record.
+records can be inspected even when their timestamps are outside the current
+window. Task details reads as a visible receipt document below the timeline —
+Usage, Sessions and Recording shown in full under caps section rules, with only
+a genuinely long list collapsing behind a single counted control. Full
+identifiers remain available (the task id copies from its row), and real
+parent-section or later-result links remain contextual to the selected record.
 
 This revision also fixes an interaction inconsistency: opening a task from the
 complete-store Attention queue must not replace that queue with only the recent
@@ -56,11 +59,6 @@ contains the page-purpose review, per-state hierarchy, exact string-bearing sour
 inventory, independent collection/receipt audits and direct validation record.
 The earlier 100-agent scores do not rate this revision. No human-usability or
 mathematical-optimum claim is made.
-
-[Collapsed record details](images/native-record-popover.png) and
-[the same detail surface at 230% reading size](images/native-record-popover-large.png)
-show the content hierarchy. These are native synthetic captures, not canonical
-pixel-reference approvals. The records in these two examples differ.
 
 ## Pointer and keyboard behavior
 

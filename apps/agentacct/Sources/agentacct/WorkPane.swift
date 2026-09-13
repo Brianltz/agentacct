@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // The Work surface — one receipts collection in three adaptive presentations:
 //
@@ -1949,28 +1950,28 @@ struct WorkRecordPage: View {
                         onRevealRecords: { proxy.scrollTo("work.timeline.records", anchor: .top) },
                         onRevealHeading: { proxy.scrollTo("work.timeline.heading", anchor: .top) })
                         .padding(.top, Space.m)
-                    DisclosureGroup("Task details") {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ReceiptTopic(title: "Usage", hint: usageHint,
-                                         help: "Counts describe captured tool calls, not progress or success. Related paths are recorded associations, not modified files. Current receipts have no ordered action ledger, so captured call counts cannot be linked to results or timing.") {
-                                RecordDimensionsCard(receipt: receipt, included: [.actions, .cost],
-                                                     showsProvenance: false, compactDigest: true)
-                            }
-                            topicDivider
-                            ReceiptTopic(title: "Sessions", hint: sessionsHint) {
-                                sessionsIndex
-                            }
-                            topicDivider
-                            ReceiptTopic(title: "Recording details", hint: recordingHint,
-                                         help: receipt.axes.orthogonalityNote) {
-                                recordingDetails
-                            }
+                    // Below the timeline, the receipt's second half is a
+                    // visible document — not a fold. Sections are always shown
+                    // (verdict → totals → history → the record); only a
+                    // genuinely long list collapses, one level deep, with the
+                    // count in its trigger. The rejected outer "Task details"
+                    // disclosure and its per-topic folds are gone.
+                    VStack(alignment: .leading, spacing: Space.xl) {
+                        ReceiptSection(
+                            title: "Usage", identifier: "usage",
+                            help: "Counts describe captured tool calls, not progress or success. Related paths are recorded associations, not modified files. Current receipts have no ordered action ledger, so captured call counts cannot be linked to results or timing."
+                        ) {
+                            RecordDimensionsCard(receipt: receipt, included: [.actions, .cost],
+                                                 showsProvenance: false, compactDigest: true)
                         }
-                        .padding(.vertical, Space.s)
-                        .background(Theme.card, in: RoundedRectangle(cornerRadius: Metrics.radius))
-                        .overlay(RoundedRectangle(cornerRadius: Metrics.radius).strokeBorder(Theme.cardLine))
+                        ReceiptSection(title: "Sessions", identifier: "sessions") {
+                            sessionsIndex
+                        }
+                        ReceiptSection(title: "Recording", identifier: "recording",
+                                       help: receipt.axes.orthogonalityNote) {
+                            recordingDetails
+                        }
                     }
-                    .workFont(.caption)
                     .padding(.top, Space.xl)
                     .accessibilityIdentifier("work.all-captured-details")
                 }
@@ -2113,50 +2114,31 @@ struct WorkRecordPage: View {
         Rectangle().fill(Theme.hairline).frame(height: 1)
     }
 
-    /// Hints on the topic rail are the visual scent of what is folded away:
-    /// counts the line items do not already carry.
-    private var usageHint: String? {
-        let types = receipt.dimensions.actions.toolCategoryCounts?.count ?? 0
-        return types > 0 ? "\(types) tool \(types == 1 ? "type" : "types")" : nil
-    }
-
-    private var sessionsHint: String? {
-        guard let groups = receipt.sessions, !groups.isEmpty else { return nil }
-        let count = groups.reduce(0) { $0 + $1.members.count }
-        return "\(count) session\(count == 1 ? "" : "s")"
-    }
-
-    private var recordingHint: String? {
-        let gaps = receipt.dimensions.gaps
-        let count = gaps.count ?? gaps.items?.count ?? 0
-        return count == 0 ? "no recorded gaps" : "\(count) gap\(count == 1 ? "" : "s")"
-    }
-
     /// A session index, not a second copy of the timeline: one quiet row per
     /// session. Steps stay on the activity canvas.
     @ViewBuilder
     private var sessionsIndex: some View {
         if let groups = receipt.sessions, !groups.isEmpty {
+            let labelled = groups.count > 1
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(groups) { group in
-                    let members = group.members
-                    if groups.count > 1 {
-                        HStack(spacing: Space.s) {
-                            CapsLabel(text: group.role == "continuation" ? "Continuation" : "Primary")
-                            if let count = group.supportingCount, count > 0 {
-                                Text("\(count) subagent\(count == 1 ? "" : "s")")
-                                    .workFont(.dataSmall).foregroundStyle(Theme.muted)
+                // The primary group is always visible; any further groups
+                // (continuations, extra roots) collapse under one counted
+                // trigger so a long roster never buries the primary session.
+                sessionGroup(groups[0], labelled: labelled)
+                if groups.count > 1 {
+                    let rest = Array(groups.dropFirst())
+                    let restCount = rest.reduce(0) { $0 + $1.members.count }
+                    OverflowDisclosure(
+                        label: "\(restCount) more session\(restCount == 1 ? "" : "s")",
+                        identifier: "work.overflow.sessions"
+                    ) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(rest) { group in
+                                sessionGroup(group, labelled: true)
                             }
                         }
-                        .padding(.top, Space.s).padding(.bottom, 2)
                     }
-                    ForEach(Array(members.enumerated()), id: \.element.id) { index, member in
-                        SessionIndexRow(
-                            member: member,
-                            preloadedStepCount: dashboard.preloadedSessions["\(member.client)::\(member.clientSessionId)"]?.steps.count
-                        )
-                        if index < members.count - 1 { topicDivider }
-                    }
+                    .padding(.top, 6)
                 }
             }
         } else {
@@ -2164,6 +2146,31 @@ struct WorkRecordPage: View {
                 .workFont(.caption)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// One session group: an optional role header and its member rows.
+    @ViewBuilder
+    private func sessionGroup(_ group: ReceiptSessionGroup, labelled: Bool) -> some View {
+        let members = group.members
+        VStack(alignment: .leading, spacing: 0) {
+            if labelled {
+                HStack(spacing: Space.s) {
+                    CapsLabel(text: group.role == "continuation" ? "Continuation" : "Primary")
+                    if let count = group.supportingCount, count > 0 {
+                        Text("\(count) subagent\(count == 1 ? "" : "s")")
+                            .workFont(.dataSmall).foregroundStyle(Theme.muted)
+                    }
+                }
+                .padding(.top, Space.s).padding(.bottom, 2)
+            }
+            ForEach(Array(members.enumerated()), id: \.element.id) { index, member in
+                SessionIndexRow(
+                    member: member,
+                    preloadedStepCount: dashboard.preloadedSessions["\(member.client)::\(member.clientSessionId)"]?.steps.count
+                )
+                if index < members.count - 1 { topicDivider }
+            }
         }
     }
 
@@ -2181,6 +2188,8 @@ struct WorkRecordPage: View {
                     Text(presentation.qualifier).workFont(.caption).foregroundStyle(Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // Definition on hover — never permanent teaching copy.
+                .help("Evidence coverage: the share of checkable claims that carry recorded evidence. A claim is not the same as an independent machine check.")
             }
             receiptFactRow("Sources") {
                 let sources = receipt.dimensions.provenance.sourcesPresent ?? []
@@ -2188,7 +2197,16 @@ struct WorkRecordPage: View {
                     Text("not recorded").workFont(.body).foregroundStyle(Theme.muted)
                 } else {
                     HStack(spacing: 6) {
-                        ForEach(sources, id: \.self) { source in ProvenanceChip(text: source) }
+                        // Each chip's legend sentence is the daemon's own, shown
+                        // on hover; the chip alone still names the source.
+                        ForEach(sources, id: \.self) { source in
+                            if let definition = receipt.dimensions.provenance.legend?[source],
+                               !definition.isEmpty {
+                                ProvenanceChip(text: source).help(definition)
+                            } else {
+                                ProvenanceChip(text: source)
+                            }
+                        }
                     }
                 }
             }
@@ -2203,26 +2221,43 @@ struct WorkRecordPage: View {
                         .workFont(.caption).foregroundStyle(Theme.amber)
                 } else {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(items.prefix(3)) { item in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                EvidencePip(shape: .hollow, tint: Theme.amber)
-                                Text(item.dimension).workFont(.captionSemibold).foregroundStyle(Theme.muted)
-                                    .frame(width: 70, alignment: .leading)
-                                Text(item.reason).workFont(.caption).foregroundStyle(Theme.amber)
-                                    .fixedSize(horizontal: false, vertical: true)
+                        ForEach(items.prefix(3)) { item in gapRow(item) }
+                        if items.count > 3 {
+                            // The overflow is the only fold here: one level, the
+                            // remaining count named in the trigger.
+                            let extra = items.count - 3
+                            OverflowDisclosure(
+                                label: "\(extra) more gap\(extra == 1 ? "" : "s")",
+                                identifier: "work.overflow.gaps"
+                            ) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ForEach(Array(items.dropFirst(3))) { item in gapRow(item) }
+                                }
+                                .padding(.top, 4)
                             }
-                        }
-                        if count > 3 {
-                            Text("+\(count - 3) more recorded gap\(count - 3 == 1 ? "" : "s")")
+                            .padding(.top, 2)
+                        } else if count > items.count {
+                            Text("\(count - items.count) more recorded gap\(count - items.count == 1 ? "" : "s") · details not included")
                                 .workFont(.caption).foregroundStyle(Theme.muted)
                         }
                     }
                 }
             }
             receiptFactRow("Task ID") {
-                Text(receipt.taskId).workFont(.dataSmall).foregroundStyle(Theme.muted)
-                    .textSelection(.enabled)
+                CopyableValue(text: receipt.taskId, announce: "task ID")
             }
+        }
+    }
+
+    /// One recorded gap: the hollow amber pip carries the tier, the dimension
+    /// names where the blind spot is, and the reason states it.
+    private func gapRow(_ item: ReceiptGapItem) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            EvidencePip(shape: .hollow, tint: Theme.amber)
+            Text(item.dimension).workFont(.captionSemibold).foregroundStyle(Theme.muted)
+                .frame(width: 70, alignment: .leading)
+            Text(item.reason).workFont(.caption).foregroundStyle(Theme.amber)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -2239,52 +2274,143 @@ struct WorkRecordPage: View {
     }
 }
 
-/// One trailing receipt topic: a full-width row with a rotating chevron and a
-/// count hint that opens its content directly. Topics never contain another
-/// fold, so the whole page stays two levels deep at most.
-private struct ReceiptTopic<Content: View>: View {
+/// A caps eyebrow paired with a hairline rule: the visible header for one
+/// section of the receipt document. Static — a heading, never a focus stop.
+/// The optional help button is the section's one place for explanation.
+private struct SectionHeader: View {
     let title: String
-    var hint: String? = nil
+    var help: String? = nil
+    let identifier: String
+
+    var body: some View {
+        HStack(spacing: Space.m) {
+            HStack(spacing: Space.m) {
+                CapsLabel(text: title)
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(title)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("work.section.\(identifier)")
+            if let help {
+                ContextHelp(title: "About \(title.lowercased())", message: help,
+                            identifier: "work.section.\(identifier).help")
+            }
+        }
+    }
+}
+
+/// One section of the visible receipt document: a header rule, then its rows.
+/// There is no fold — the section's facts are always shown; only a genuinely
+/// long list inside uses an `OverflowDisclosure`.
+private struct ReceiptSection<Content: View>: View {
+    let title: String
+    let identifier: String
     var help: String? = nil
     @ViewBuilder let content: () -> Content
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var expanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: Space.s) {
-                Button {
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { expanded.toggle() }
-                } label: {
-                    HStack(spacing: Space.s) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(expanded ? Theme.accent : Theme.muted)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
-                        Text(title).workFont(.rowLabel).foregroundStyle(Theme.ink)
-                        Spacer(minLength: Space.m)
-                        if let hint {
-                            Text(hint).workFont(.dataSmall).foregroundStyle(Theme.muted).lineLimit(1)
-                        }
-                    }
-                    .padding(.vertical, 10).padding(.horizontal, Space.m)
+            SectionHeader(title: title, help: help, identifier: identifier)
+                .padding(.bottom, Space.s)
+            content()
+        }
+    }
+}
+
+/// The only fold in the document: a quiet, counted trigger that reveals a
+/// genuinely long list in place. One level deep — its content never folds
+/// again. Muted until hovered (then ink); the chevron carries the affordance
+/// and nudges on hover. Internal so the Usage digest can reuse it.
+struct OverflowDisclosure<Content: View>: View {
+    let label: String
+    var identifier: String? = nil
+    @ViewBuilder let content: () -> Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var expanded = false
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s) {
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .offset(x: hovering && !expanded ? 1 : 0)
+                    Text(expanded ? "Show less" : label)
+                        .workFont(.captionSemibold)
+                }
+                .foregroundStyle(hovering || expanded ? Theme.ink : Theme.muted)
+                .padding(.vertical, 6).padding(.horizontal, 4)
+                .frame(minHeight: 24, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(SurfaceButtonStyle())
+            .onHover { inside in
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.12)) { hovering = inside }
+            }
+            .accessibilityLabel(label)
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            .accessibilityIdentifier(identifier ?? "work.overflow")
+            if expanded { content() }
+        }
+    }
+}
+
+/// A monospaced identifier the reader can copy. The value stays selectable; a
+/// copy glyph fades in on hover and is a keyboard focus stop of its own,
+/// turning to a checkmark for 1.5 s with a VoiceOver announcement on copy.
+private struct CopyableValue: View {
+    let text: String
+    /// What was copied, for the tooltip and the announcement ("task ID").
+    let announce: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: Space.s) {
+            Text(text)
+                .workFont(.dataSmall)
+                .foregroundStyle(Theme.muted)
+                .textSelection(.enabled)
+            Button(action: copy) {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(copied ? Theme.green : Theme.accent)
+                    .frame(minWidth: 24, minHeight: 24)
                     .contentShape(Rectangle())
-                }
-                .buttonStyle(SurfaceButtonStyle())
-                .accessibilityLabel(title)
-                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-                .accessibilityHint(hint ?? "")
-                .accessibilityIdentifier("work.topic.\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
-                if let help {
-                    ContextHelp(title: "About \(title.lowercased())", message: help,
-                                identifier: "work.topic.\(title.lowercased().replacingOccurrences(of: " ", with: "-")).help")
-                }
             }
-            if expanded {
-                content()
-                    .padding(.horizontal, Space.m)
-                    .padding(.bottom, Space.s)
-            }
+            .buttonStyle(SurfaceButtonStyle())
+            .opacity(hovering || copied ? 1 : 0)
+            .help("Copy \(announce)")
+            .accessibilityLabel(copied ? "Copied \(announce)" : "Copy \(announce)")
+            Spacer(minLength: 0)
+        }
+        .onHover { inside in
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.12)) { hovering = inside }
+        }
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.12)) { copied = true }
+        if !SnapshotMode.enabled, let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            NSAccessibility.post(
+                element: window,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: "Copied \(announce)",
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue,
+                ]
+            )
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.12)) { copied = false }
         }
     }
 }
