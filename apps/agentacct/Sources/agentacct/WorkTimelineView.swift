@@ -142,21 +142,18 @@ struct WorkTimelineView: View {
             }
             evidenceAndInspector
             if let exportError { Text(exportError).workFont(.caption).foregroundStyle(Theme.coral) }
-            DisclosureGroup("Recording details") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("\(displayProjection.records.count) loaded records. Search covers loaded activity.")
-                    if let timelineError { Text(timelineError) }
-                    Text(dashboard.isOfflineSnapshot ? "Saved copies only. No recorder requests or changes are made from this view." : "Snapshots refresh every 3 seconds while this view is open. Intermediate changes between snapshots may not be available.")
-                    Text(lastObserved.map { "Last successful activity snapshot: \(Self.dateText($0.timeIntervalSince1970))." } ?? "No live activity snapshot received in this view.")
-                    ForEach(latestProjection.lanes) { lane in
-                        Text("\(lane.title): \(lane.availability)")
+            // Degradation notices stay visible where they qualify the canvas;
+            // the static explanations live with the Activity help. There is no
+            // second "Recording details" fold competing with Task details.
+            let notices = latestProjection.notices
+            if !notices.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(notices, id: \.self) { notice in
+                        Text(notice).workFont(.caption).foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    ForEach(latestProjection.notices, id: \.self) { Text($0) }
-                    Text("Recorded section spans end at their latest update. Check markers are points. Neither shape implies measured execution time.")
-                }
-                .workFont(.caption).foregroundStyle(Theme.muted).padding(.top, 6)
+                }.padding(.top, 6)
             }
-            .workFont(.caption)
         }
         .workFont(.body)
         .padding(Space.m)
@@ -368,7 +365,7 @@ struct WorkTimelineView: View {
                 .accessibilityFocused($accessibleEvidence, equals: "timeline-heading")
                 .accessibilityAddTraits(.isHeader)
                 ContextHelp(title: "About activity",
-                    message: "Drag the canvas to move through time. Scroll to make the visible time span smaller or larger, or pinch to zoom around the pointer. Drag the overview window to move it and its edges to resize it. Select a record to read its details below the timeline; dense groups list their members there. Stems mark recorded times, not causal links. Section spans end at the latest reported update, not a measured execution finish. Snapshots refresh every 3 seconds.",
+                    message: "Drag the canvas to move through time. Scroll to make the visible time span smaller or larger, or pinch to zoom around the pointer. Drag the overview window to move it and its edges to resize it. Select a record to read its details below the timeline; dense groups list their members there. Stems mark recorded times, not causal links. Section spans end at the latest reported update, not a measured execution finish. Check markers are points. Loaded history refreshes every 3 seconds while this view is open; search covers loaded records.",
                     identifier: "work.timeline.help")
             }
             HStack(spacing: 5) {

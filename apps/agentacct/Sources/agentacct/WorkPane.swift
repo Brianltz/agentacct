@@ -1949,21 +1949,18 @@ struct WorkRecordPage: View {
                             // lives one level down in the topics below.
                             RecordSummaryStrip(receipt: receipt, summary: summary)
                                 .padding(.top, Space.m)
-                            DisclosureGroup("Check history") {
-                                RecordChecksCard(evidence: receipt.dimensions.evidence, taskId: receipt.taskId)
-                                    .padding(.top, Space.s)
-                            }
-                            DisclosureGroup("Usage") {
-                                RecordDimensionsCard(receipt: receipt, included: [.actions, .cost], title: nil)
-                                    .padding(.top, Space.s)
-                            }
-                            DisclosureGroup("Sessions") { sessionsSection.padding(.top, Space.s) }
-                            DisclosureGroup("Recording details") {
-                                VStack(alignment: .leading, spacing: Space.l) {
-                                    Text("Task ID: \(receipt.taskId)").workFont(.caption).textSelection(.enabled)
-                                    RecordDimensionsCard(receipt: receipt, included: [.task, .agents])
-                                        .padding(.top, Space.s)
-                                    sideColumn.padding(.top, Space.s)
+                            VStack(alignment: .leading, spacing: 0) {
+                                ReceiptTopic(title: "Usage", hint: usageHint) {
+                                    RecordDimensionsCard(receipt: receipt, included: [.actions, .cost])
+                                }
+                                topicDivider
+                                ReceiptTopic(title: "Sessions", hint: sessionsHint) {
+                                    sessionsIndex
+                                }
+                                topicDivider
+                                ReceiptTopic(title: "Recording details", hint: recordingHint,
+                                             help: receipt.axes.orthogonalityNote) {
+                                    recordingDetails
                                 }
                             }
                         }.padding(.bottom, Space.s)
@@ -2107,68 +2104,215 @@ struct WorkRecordPage: View {
         return parts.joined(separator: " · ")
     }
 
-    private var sideColumn: some View {
-        VStack(alignment: .leading, spacing: Space.xl) {
-            RecordCoverageCard(
-                evidence: receipt.axes.evidenceStrength,
-                schemaVersion: receipt.schemaVersion
-            )
-            RecordSourcesCard(provenance: receipt.dimensions.provenance)
-            RecordGapsCard(gaps: receipt.dimensions.gaps)
-            if let orthogonality = receipt.axes.orthogonalityNote {
-                Text(orthogonality).workFont(.dataSmall).foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+    private var topicDivider: some View {
+        Rectangle().fill(Theme.hairline).frame(height: 1)
+    }
+
+    /// Hints on the topic rail are the visual scent of what is folded away:
+    /// counts the line items do not already carry.
+    private var usageHint: String? {
+        let types = receipt.dimensions.actions.toolCategoryCounts?.count ?? 0
+        return types > 0 ? "\(types) tool \(types == 1 ? "type" : "types")" : nil
+    }
+
+    private var sessionsHint: String? {
+        guard let groups = receipt.sessions, !groups.isEmpty else { return nil }
+        let count = groups.reduce(0) { $0 + $1.members.count }
+        return "\(count) session\(count == 1 ? "" : "s")"
+    }
+
+    private var recordingHint: String? {
+        let gaps = receipt.dimensions.gaps
+        let count = gaps.count ?? gaps.items?.count ?? 0
+        return count == 0 ? "no recorded gaps" : "\(count) gap\(count == 1 ? "" : "s")"
+    }
+
+    /// A session index, not a second copy of the timeline: one quiet row per
+    /// session. Steps stay on the activity canvas.
+    @ViewBuilder
+    private var sessionsIndex: some View {
+        if let groups = receipt.sessions, !groups.isEmpty {
+            VStack(alignment: .leading, spacing: Space.s) {
+                ForEach(groups) { group in
+                    if groups.count > 1 {
+                        HStack(spacing: 6) {
+                            Chip(text: group.role == "continuation" ? "continuation" : "primary",
+                                 tint: group.role == "continuation" ? Theme.muted : Theme.accent)
+                            if let count = group.supportingCount, count > 0 {
+                                Text("\(count) subagent\(count == 1 ? "" : "s")")
+                                    .workFont(.dataSmall).foregroundStyle(Theme.muted)
+                            }
+                        }
+                    }
+                    ForEach(group.members) { member in
+                        SessionIndexRow(
+                            member: member,
+                            preloadedStepCount: dashboard.preloadedSessions["\(member.client)::\(member.clientSessionId)"]?.steps.count
+                        )
+                    }
+                }
+            }
+        } else {
+            Text("Session details aren't available for this receipt.")
+                .workFont(.caption)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Identity and provenance in one place: task and agent facts, evidence
+    /// coverage, sources and gaps. Each fact appears once on the page.
+    private var recordingDetails: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Task ID: \(receipt.taskId)").workFont(.caption).textSelection(.enabled)
+                .padding(.bottom, Space.s)
+            RecordDimensionsCard(receipt: receipt, included: [.task, .agents])
+            receiptFactRow("Coverage") {
+                let presentation = ReceiptCoveragePresentation(evidence: receipt.axes.evidenceStrength)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(presentation.value).workFont(.body)
+                        .foregroundStyle(presentation.isInconsistent ? Theme.amber : Theme.ink)
+                    Text(presentation.qualifier).workFont(.caption).foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            receiptFactRow("Sources") {
+                let sources = receipt.dimensions.provenance.sourcesPresent ?? []
+                if sources.isEmpty {
+                    Text("not recorded").workFont(.body).foregroundStyle(Theme.muted)
+                } else {
+                    HStack(spacing: 6) {
+                        ForEach(sources, id: \.self) { source in ProvenanceChip(text: source) }
+                    }
+                }
+            }
+            let gapsDim = receipt.dimensions.gaps
+            receiptFactRow("Gaps") {
+                let items = gapsDim.items ?? []
+                let count = gapsDim.count ?? items.count
+                if count == 0 {
+                    Text("no recorded gaps").workFont(.body).foregroundStyle(Theme.muted)
+                } else if items.isEmpty {
+                    Text("\(count) recorded gap\(count == 1 ? "" : "s") · details not included")
+                        .workFont(.caption).foregroundStyle(Theme.amber)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(items.prefix(3)) { item in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                EvidencePip(shape: .hollow, tint: Theme.amber)
+                                Text(item.dimension).workFont(.captionSemibold).foregroundStyle(Theme.muted)
+                                    .frame(width: 70, alignment: .leading)
+                                Text(item.reason).workFont(.caption).foregroundStyle(Theme.amber)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        if count > 3 {
+                            Text("+\(count - 3) more recorded gap\(count - 3 == 1 ? "" : "s")")
+                                .workFont(.caption).foregroundStyle(Theme.muted)
+                        }
+                    }
+                }
             }
         }
     }
 
-    @ViewBuilder
-    private var sessionsSection: some View {
-        VStack(alignment: .leading, spacing: Space.s) {
-            HStack(alignment: .firstTextBaseline, spacing: Space.s) {
-                SectionCaption(tone: Theme.muted, text: "Sessions & steps")
-                    .accessibilityHeading(.h2)
-                if let groups = receipt.sessions, !groups.isEmpty {
-                    let count = groups.reduce(0) { $0 + $1.members.count }
-                    Text("\(count) session\(count == 1 ? "" : "s")")
-                        .workFont(.dataSmall)
-                        .foregroundStyle(Theme.muted)
-                }
-            }
-            if let groups = receipt.sessions, !groups.isEmpty {
-                ForEach(groups) { group in
-                    VStack(alignment: .leading, spacing: 5) {
-                        // Only label the group when there's more than one root (a
-                        // Task with continuations); a single-root Task is just its
-                        // sessions.
-                        if groups.count > 1 {
-                            HStack(spacing: 6) {
-                                Chip(text: group.role == "continuation" ? "continuation" : "primary",
-                                     tint: group.role == "continuation" ? Theme.muted : Theme.accent)
-                                if let count = group.supportingCount, count > 0 {
-                                    Text("\(count) subagent\(count == 1 ? "" : "s")")
-                                        .workFont(.dataSmall).foregroundStyle(Theme.muted)
-                                }
-                            }
-                        }
-                        ScrollContentStack(alignment: .leading, spacing: 5) {
-                            ForEach(group.members) { member in
-                                SessionDrillRow(
-                                    member: member,
-                                    initiallyExpanded: false
-                                )
-                            }
+    private func receiptFactRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: Space.l) {
+            Text(label).workFont(.rowLabel).foregroundStyle(Theme.ink)
+                .frame(width: 128, alignment: .leading)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, Space.m)
+        .overlay(alignment: .top) { topicDivider }
+    }
+}
+
+/// One trailing receipt topic: a full-width row with a rotating chevron and a
+/// count hint that opens its content directly. Topics never contain another
+/// fold, so the whole page stays two levels deep at most.
+private struct ReceiptTopic<Content: View>: View {
+    let title: String
+    var hint: String? = nil
+    var help: String? = nil
+    @ViewBuilder let content: () -> Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Space.s) {
+                Button {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: Space.s) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(expanded ? Theme.accent : Theme.muted)
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                        Text(title).workFont(.rowLabel).foregroundStyle(Theme.ink)
+                        Spacer(minLength: Space.m)
+                        if let hint {
+                            Text(hint).workFont(.dataSmall).foregroundStyle(Theme.muted).lineLimit(1)
                         }
                     }
+                    .padding(.vertical, 10).padding(.horizontal, Space.m)
+                    .contentShape(Rectangle())
                 }
-            } else {
-                Text("Session details aren't available for this receipt.")
-                    .workFont(.caption)
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+                .buttonStyle(SurfaceButtonStyle())
+                .accessibilityLabel(title)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                .accessibilityHint(hint ?? "")
+                .accessibilityIdentifier("work.topic.\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
+                if let help {
+                    ContextHelp(title: "About \(title.lowercased())", message: help,
+                                identifier: "work.topic.\(title.lowercased().replacingOccurrences(of: " ", with: "-")).help")
+                }
+            }
+            if expanded {
+                content()
+                    .padding(.horizontal, Space.m)
+                    .padding(.bottom, Space.s)
             }
         }
     }
+}
+
+/// A quiet session row for the Sessions topic: identity and, when already
+/// loaded, a step count. Steps themselves live on the activity canvas.
+private struct SessionIndexRow: View {
+    let member: ReceiptSessionMember
+    let preloadedStepCount: Int?
+
+    private var label: String {
+        if let title = member.title, !title.isEmpty { return title }
+        return "\(member.client) · \(sessionDistinguishingID(member.clientSessionId))"
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s) {
+            Text(label).workFont(.body).foregroundStyle(Theme.ink)
+                .lineLimit(1)
+            if member.role == "subagent" {
+                Chip(text: member.sessionKind ?? "subagent", tint: Theme.muted)
+            }
+            Spacer(minLength: Space.s)
+            if let count = preloadedStepCount {
+                Text("\(count) step\(count == 1 ? "" : "s")")
+                    .workFont(.dataSmall).foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The short, distinguishing tail of an opaque session identity.
+func sessionDistinguishingID(_ clientSessionId: String) -> String {
+    if let last = clientSessionId.split(separator: ":").last, last.count < clientSessionId.count {
+        return String(last)
+    }
+    return clientSessionId
 }
 
 // MARK: - Session drill-down

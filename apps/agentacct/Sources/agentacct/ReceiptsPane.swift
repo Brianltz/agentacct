@@ -833,22 +833,14 @@ struct RecordDimensionsCard: View {
 
     let receipt: Receipt
     var included: Set<Dimension> = Set(Dimension.allCases)
-    var title: String? = "Task context"
 
     private var ordered: [Dimension] { Dimension.allCases.filter(included.contains) }
 
     var body: some View {
-        Card(padding: Space.xl) {
-            VStack(alignment: .leading, spacing: 0) {
-                if let title {
-                    Text(title).workFont(.titleCard).foregroundStyle(Theme.ink)
-                        .accessibilityAddTraits(.isHeader)
-                    Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, Space.m)
-                }
-                ForEach(Array(ordered.enumerated()), id: \.offset) { index, dimension in
-                    if index > 0 { hairline }
-                    row(for: dimension)
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(ordered.enumerated()), id: \.offset) { index, dimension in
+                if index > 0 { hairline }
+                row(for: dimension)
             }
         }
     }
@@ -1227,89 +1219,6 @@ struct BlockerCallout: View {
 /// The evidence-coverage card: the checked/checkable headline, a coverage bar
 /// whose segment widths are strictly proportional to the tier counts, a
 /// counted legend wearing the pip shapes, and the honesty ledger.
-struct RecordCoverageCard: View {
-    let evidence: ReceiptEvidence
-    let schemaVersion: String
-
-    private var tiers: [(grade: String, count: Int)] {
-        let byTier = evidence.byTier
-        return [
-            ("externally_verified", byTier?.externallyVerified ?? 0),
-            ("independently_checked", byTier?.independentlyChecked ?? 0),
-            ("self_checked", byTier?.selfChecked ?? 0),
-            ("unchecked", byTier?.unchecked ?? 0),
-        ]
-    }
-
-    private var presentation: ReceiptCoveragePresentation {
-        .init(evidence: evidence)
-    }
-
-    var body: some View {
-        Card(padding: Space.xl) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Text("Evidence coverage").workFont(.titleCard).foregroundStyle(Theme.ink)
-                        .accessibilityAddTraits(.isHeader)
-                    ContextHelp(
-                        title: "About evidence coverage",
-                        message: "Counts show how many checkable steps carry a passing check, and how independent that check is — counts, not a probability of correctness.\n\nReceipt format: \(schemaVersion)",
-                        identifier: "receipt.coverage.help"
-                    )
-                    Spacer()
-                }
-                Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, Space.m)
-
-                Text(presentation.value)
-                    .workFont(size: 16, weight: .semibold, relativeTo: .headline)
-                    .foregroundStyle(
-                        presentation.isInconsistent
-                            ? Theme.amber
-                            : evidence.gradeable == false ? Theme.muted : Theme.ink
-                    )
-                Text(presentation.qualifier)
-                    .workFont(.caption).foregroundStyle(Theme.muted)
-                    .padding(.top, 4)
-
-                if evidence.gradeable != false,
-                   let checkable = evidence.checkableTotal,
-                   checkable > 0 {
-                    if presentation.tierBreakdownAvailable {
-                        CoverageBar(segments: tiers.map { CoverageSegment(count: $0.count, grade: $0.grade) })
-                            .padding(.top, Space.m)
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(tiers.filter { $0.count > 0 }, id: \.grade) { tier in
-                                let style = EvidenceTierStyle.forGrade(tier.grade)
-                                HStack(spacing: 7) {
-                                    EvidencePip(shape: style.pip, tint: style.tint)
-                                    Text(style.label).workFont(.caption).foregroundStyle(Theme.ink)
-                                    Text("\(tier.count)").workFont(.dataSmall).foregroundStyle(Theme.muted)
-                                }
-                            }
-                        }
-                        .padding(.top, Space.m)
-                        if let notice = receiptExternalEvidenceNotice(byTier: evidence.byTier) {
-                            Text(notice)
-                                .workFont(.caption).foregroundStyle(Theme.muted)
-                                .padding(.top, Space.s)
-                        }
-                    } else if let notice = presentation.tierBreakdownNotice {
-                        Text(notice)
-                            .workFont(.caption).foregroundStyle(Theme.muted)
-                            .padding(.top, Space.s)
-                    }
-                }
-
-                if let ledger = evidence.ledger {
-                    Text(ledger).workFont(.caption).foregroundStyle(Theme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, Space.s)
-                }
-            }
-        }
-    }
-}
-
 // MARK: - Checks
 
 /// Every check the store holds for this receipt, with its result mark and
@@ -1838,80 +1747,8 @@ private struct CheckDetailField<Content: View>: View {
 
 // MARK: - Gaps
 
-struct RecordGapsCard: View {
-    let gaps: ReceiptGapsDim
-
-    var body: some View {
-        let items = gaps.items ?? []
-        if !items.isEmpty {
-            Card(padding: Space.xl) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Gaps (\(items.count)) — what could not be proven")
-                        .workFont(.titleCard).foregroundStyle(Theme.ink)
-                        .accessibilityAddTraits(.isHeader)
-                    Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, Space.m)
-                    ScrollContentStack(alignment: .leading, spacing: Space.s) {
-                        ForEach(items) { item in
-                            HStack(alignment: .firstTextBaseline, spacing: Space.s) {
-                                Text(item.dimension).workFont(.captionSemibold).foregroundStyle(Theme.muted)
-                                    .frame(width: 70, alignment: .leading)
-                                Text(item.reason).workFont(.caption).foregroundStyle(Theme.muted)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // MARK: - Evidence sources
 
 /// The receipt's evidence sources: which source kinds are present on this
 /// record, each with the daemon's legend sentence. When no independent
 /// verifier (CI) evidence exists, that is stated as a fact — never a meter.
-struct RecordSourcesCard: View {
-    let provenance: ReceiptProvenanceDim
-
-    private var presentSources: [String] {
-        if let present = provenance.sourcesPresent, !present.isEmpty { return present }
-        return (provenance.legend ?? [:]).keys.sorted()
-    }
-
-    var body: some View {
-        let legend = provenance.legend ?? [:]
-        if !presentSources.isEmpty {
-            Card(padding: Space.xl) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Evidence sources").workFont(.titleCard).foregroundStyle(Theme.ink)
-                        .accessibilityAddTraits(.isHeader)
-                    Rectangle().fill(Theme.hairline).frame(height: 1).padding(.top, Space.m)
-                    ForEach(Array(presentSources.enumerated()), id: \.element) { index, source in
-                        if index > 0 {
-                            Rectangle().fill(Theme.hairline).frame(height: 1)
-                        }
-                        HStack(alignment: .top, spacing: Space.m) {
-                            Text(source).workFont(.rowLabel).foregroundStyle(Theme.ink)
-                                .frame(width: 96, alignment: .leading)
-                            Text(legend[source] ?? "recorded on this receipt")
-                                .workFont(.caption).foregroundStyle(Theme.muted)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.vertical, Space.m)
-                    }
-                    if let notice = receiptCIEvidenceNotice(sources: presentSources) {
-                        Rectangle().fill(Theme.hairline).frame(height: 1)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(notice.headline)
-                                .workFont(.rowLabel).foregroundStyle(Theme.muted)
-                            Text(notice.detail)
-                                .workFont(.caption).foregroundStyle(Theme.muted)
-                        }
-                        .padding(.top, Space.m)
-                    }
-                }
-            }
-        }
-    }
-}
