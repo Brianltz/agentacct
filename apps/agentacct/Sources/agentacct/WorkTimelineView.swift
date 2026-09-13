@@ -144,7 +144,8 @@ struct WorkTimelineView: View {
             if let exportError { Text(exportError).workFont(.caption).foregroundStyle(Theme.coral) }
             // Degradation notices stay visible where they qualify the canvas;
             // the static explanations live with the Activity help. There is no
-            // second "Recording details" fold competing with Task details.
+            // second "Recording details" fold here; the receipt document below
+            // the timeline owns the Recording section.
             let notices = latestProjection.notices
             if !notices.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {

@@ -676,10 +676,12 @@ struct ReceiptActionsDigest: View {
             if !scope.isEmpty {
                 metadataLine(label: "Related paths", value: scope)
             }
-            // On the Work page these facts already have a home elsewhere: action
-            // provenance in the Recording section's Sources row, and the capture
-            // boundary in this section's own help. Repeating them would duplicate
-            // facts, so the compact digest omits them.
+            // On the Work page these facts already have a home elsewhere: the
+            // source identities in the Recording section's Sources row (the
+            // whole-task union), the capture boundary in this section's help,
+            // and the actions dimension's gaps in the Recording Gaps row (the
+            // daemon rolls every dimension's gaps into that list). Repeating
+            // them would duplicate facts, so the compact digest omits them.
             if !compact, !sourceText.isEmpty {
                 metadataLine(label: "Action sources", value: sourceText)
             }
@@ -717,38 +719,31 @@ struct ReceiptActionsDigest: View {
         func pct(_ count: Int) -> String {
             (Double(count) / Double(denom)).formatted(.percent.precision(.fractionLength(0...1)))
         }
-        var displayed: [(label: String, count: Int, detail: String, key: String)]
+        // One descending-count order serves both decisions: which five types
+        // stay visible when there are many, and each visible slice's tint rank.
+        let byCountDesc = synopsis.metrics.sorted { $0.count > $1.count }
+        let visibleKeys = synopsis.metrics.count > 6 ? Set(byCountDesc.prefix(5).map(\.key)) : nil
+        var tintRank: [String: Int] = [:]
+        for metric in byCountDesc where visibleKeys?.contains(metric.key) ?? true {
+            tintRank[metric.key] = tintRank.count
+        }
         var otherCount = 0
-        if synopsis.metrics.count > 6 {
-            let topKeys = Set(synopsis.metrics.sorted { $0.count > $1.count }.prefix(5).map(\.key))
-            displayed = []
-            for metric in synopsis.metrics {
-                if topKeys.contains(metric.key) {
-                    displayed.append((metric.label, metric.count, metric.detail, metric.key))
-                } else {
-                    otherCount += metric.count
-                }
+        var segments: [BarSegment] = []
+        for metric in synopsis.metrics {  // taxonomy order, matching the legend
+            guard visibleKeys?.contains(metric.key) ?? true else {
+                otherCount += metric.count
+                continue
             }
-        } else {
-            displayed = synopsis.metrics.map { ($0.label, $0.count, $0.detail, $0.key) }
-        }
-        // Rank by count (desc) to pick each slice's accent opacity.
-        let ranking = displayed.map(\.count).enumerated()
-            .sorted { $0.element > $1.element }.map(\.offset)
-        var opacityForIndex: [Int: Double] = [:]
-        for (rank, index) in ranking.enumerated() {
-            opacityForIndex[index] = accentRamp[min(rank, accentRamp.count - 1)]
-        }
-        var segments = displayed.enumerated().map { index, item in
-            BarSegment(
-                id: item.key,
-                label: item.label,
-                count: item.count,
-                fraction: Double(item.count) / Double(denom),
-                color: Theme.accent.opacity(opacityForIndex[index] ?? accentRamp.last!),
-                tooltip: "\(item.label) · \(item.count) call\(item.count == 1 ? "" : "s") · \(pct(item.count)) — \(item.detail)",
-                axValue: "\(item.count) call\(item.count == 1 ? "" : "s"), \(pct(item.count)). \(item.detail)"
-            )
+            let opacity = accentRamp[min(tintRank[metric.key] ?? accentRamp.count - 1, accentRamp.count - 1)]
+            segments.append(BarSegment(
+                id: metric.key,
+                label: metric.label,
+                count: metric.count,
+                fraction: Double(metric.count) / Double(denom),
+                color: Theme.accent.opacity(opacity),
+                tooltip: "\(metric.label) · \(metric.count) call\(metric.count == 1 ? "" : "s") · \(pct(metric.count)) — \(metric.detail)",
+                axValue: "\(metric.count) call\(metric.count == 1 ? "" : "s"), \(pct(metric.count)). \(metric.detail)"
+            ))
         }
         if otherCount > 0 {
             segments.append(BarSegment(
@@ -770,6 +765,9 @@ struct ReceiptActionsDigest: View {
             GeometryReader { proxy in
                 HStack(spacing: 0) {
                     ForEach(segments) { segment in
+                        // A 2 pt floor keeps a tiny nonzero share visible; it
+                        // bends strict proportionality by at most ~2 pt per
+                        // slice (≤ 7 slices), absorbed by the clip at the end.
                         segment.color
                             .frame(width: max(proxy.size.width * segment.fraction, segment.fraction > 0 ? 2 : 0))
                             .help(segment.tooltip)
@@ -800,6 +798,9 @@ struct ReceiptActionsDigest: View {
     }
 
     /// A swatch + label + exact count per displayed slice; wraps at any width.
+    /// The bar segments already carry each type's VoiceOver label and share, so
+    /// the legend is a visual key only — hidden from assistive tech to avoid
+    /// reading every type twice.
     private func legend(_ segments: [BarSegment]) -> some View {
         LazyVGrid(
             columns: [GridItem(.adaptive(minimum: 116), spacing: Space.m, alignment: .leading)],
@@ -816,11 +817,9 @@ struct ReceiptActionsDigest: View {
                         .foregroundStyle(Theme.ink).monospacedDigit()
                     Spacer(minLength: 0)
                 }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(segment.label)
-                .accessibilityValue(segment.axValue)
             }
         }
+        .accessibilityHidden(true)
     }
 
     /// Every captured type with its exact count and share — the overflow body.

@@ -2220,25 +2220,35 @@ struct WorkRecordPage: View {
                     Text("\(count) recorded gap\(count == 1 ? "" : "s") · details not included")
                         .workFont(.caption).foregroundStyle(Theme.amber)
                 } else {
+                    // Detailed gaps beyond the third fold into one counted
+                    // trigger; any gaps counted without detail are named too, so
+                    // the remaining total is honest whichever form the extras take.
+                    let undetailed = max(count - items.count, 0)
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(items.prefix(3)) { item in gapRow(item) }
+                        // Index-stable identity: two gaps sharing a dimension and
+                        // reason must both render, never collapse into one row.
+                        ForEach(Array(items.prefix(3).enumerated()), id: \.offset) { _, item in gapRow(item) }
                         if items.count > 3 {
-                            // The overflow is the only fold here: one level, the
-                            // remaining count named in the trigger.
-                            let extra = items.count - 3
+                            let remaining = (items.count - 3) + undetailed
                             OverflowDisclosure(
-                                label: "\(extra) more gap\(extra == 1 ? "" : "s")",
+                                label: "\(remaining) more gap\(remaining == 1 ? "" : "s")",
                                 identifier: "work.overflow.gaps"
                             ) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    ForEach(Array(items.dropFirst(3))) { item in gapRow(item) }
+                                    ForEach(Array(items.dropFirst(3).enumerated()), id: \.offset) { _, item in gapRow(item) }
+                                    if undetailed > 0 {
+                                        Text("\(undetailed) more recorded gap\(undetailed == 1 ? "" : "s") · details not included")
+                                            .workFont(.caption).foregroundStyle(Theme.amber)
+                                    }
                                 }
                                 .padding(.top, 4)
                             }
                             .padding(.top, 2)
-                        } else if count > items.count {
-                            Text("\(count - items.count) more recorded gap\(count - items.count == 1 ? "" : "s") · details not included")
-                                .workFont(.caption).foregroundStyle(Theme.muted)
+                        } else if undetailed > 0 {
+                            // Same amber as every other gap fact: a counted-but-
+                            // undetailed gap is still a gap.
+                            Text("\(undetailed) more recorded gap\(undetailed == 1 ? "" : "s") · details not included")
+                                .workFont(.caption).foregroundStyle(Theme.amber)
                         }
                     }
                 }
@@ -2370,6 +2380,7 @@ private struct CopyableValue: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
     @State private var copied = false
+    @FocusState private var focused: Bool
 
     var body: some View {
         HStack(spacing: Space.s) {
@@ -2385,7 +2396,10 @@ private struct CopyableValue: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(SurfaceButtonStyle())
-            .opacity(hovering || copied ? 1 : 0)
+            .focused($focused)
+            // Revealed on hover, while focused (a sighted keyboard user must
+            // see the stop they landed on and its checkmark), and after a copy.
+            .opacity(hovering || focused || copied ? 1 : 0)
             .help("Copy \(announce)")
             .accessibilityLabel(copied ? "Copied \(announce)" : "Copy \(announce)")
             Spacer(minLength: 0)
