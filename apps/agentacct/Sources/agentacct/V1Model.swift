@@ -1616,6 +1616,6 @@ struct RecordSummaryPresentation: Equatable {
                                       absent: "not reported", isWarning: false)
         }
         return ReceiptSummaryItem(id: "coverage", label: "Coverage", value: "\(checked)/\(total)",
-                                  qualifier: "checkable claims checked", absent: nil, isWarning: false)
+                                  qualifier: "of checkable claims", absent: nil, isWarning: false)
     }
 }

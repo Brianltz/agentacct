@@ -66,7 +66,7 @@ final class RecordSummaryPresentationTests: XCTestCase {
 
         let reported = RecordSummaryPresentation(inputs: inputs())
         XCTAssertEqual(item(reported, "coverage")?.value, "3/4")
-        XCTAssertEqual(item(reported, "coverage")?.qualifier, "checkable claims checked")
+        XCTAssertEqual(item(reported, "coverage")?.qualifier, "of checkable claims")
 
         let missing = RecordSummaryPresentation(inputs: inputs(coverageChecked: nil, coverageTotal: nil))
         XCTAssertNil(item(missing, "coverage")?.value)
