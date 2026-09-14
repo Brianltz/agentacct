@@ -63,16 +63,39 @@ enum CLIPayloadInspector {
                 guard !relative.utf8.contains(0),
                       let values = try? child.resourceValues(
                           forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
-                      ),
-                      values.isSymbolicLink != true,
-                      let attributes = try? fm.attributesOfItem(atPath: child.path),
+                      )
+                else { return false }
+                let pathBytes = Data(relative.utf8)
+
+                if values.isSymbolicLink == true {
+                    // A framework must keep its canonical aliases (Versions/Current
+                    // and the top-level binary/Resources) to stay a codesignable
+                    // bundle. Bind the link's path and target into the identity so
+                    // a changed target changes the fingerprint, but never follow it:
+                    // the target must be relative with no ".." component, which
+                    // confines it to the tree even through symlinked intermediates
+                    // so no stable path can alias bytes outside the payload.
+                    guard let target = try? fm.destinationOfSymbolicLink(atPath: child.path),
+                          !target.hasPrefix("/"),
+                          symlinkTargetIsConfined(target)
+                    else { return false }
+                    records.append(record(
+                        kind: 0x4C,
+                        path: pathBytes,
+                        mode: 0,
+                        size: 0,
+                        digest: Data(target.utf8)
+                    ))
+                    continue
+                }
+
+                guard let attributes = try? fm.attributesOfItem(atPath: child.path),
                       let permissions = attributes[.posixPermissions] as? NSNumber,
                       permissions.intValue & 0o022 == 0,
                       !requireCurrentUserOwner || currentUserOwns(attributes)
                 else { return false }
 
                 let mode = permissions.intValue & 0o777
-                let pathBytes = Data(relative.utf8)
                 if values.isDirectory == true {
                     records.append(record(
                         kind: 0x44,
@@ -116,6 +139,18 @@ enum CLIPayloadInspector {
             return false
         }
         return values.isDirectory == true && values.isSymbolicLink != true
+    }
+
+    /// A relative symlink target is confined to the payload iff it contains no
+    /// ".." component. A forward-only relative target can only descend from the
+    /// link's own (in-payload) directory, so following it — even through other
+    /// forward-only symlinks — can never climb out of the tree. ".." must be
+    /// rejected rather than resolved lexically: after a symlinked component, the
+    /// OS resolves ".." against that component's physical target, not the
+    /// lexical path, so a ".." target that looks in-root can physically escape.
+    /// Absolute targets are rejected by the caller before this is reached.
+    private static func symlinkTargetIsConfined(_ target: String) -> Bool {
+        !target.split(separator: "/", omittingEmptySubsequences: false).contains("..")
     }
 
     private static func currentUserOwns(_ attributes: [FileAttributeKey: Any]) -> Bool {
