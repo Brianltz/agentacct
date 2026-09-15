@@ -17,9 +17,15 @@ Presentation only: the numbers, vocabulary, and honesty rules come verbatim from
 the shared modules (``usage_snapshot``, ``receipt``, ``work_ledger``,
 ``ingestion_health``), so this surface can never disagree with the CLI or app.
 
-Refresh model (two timers): every ``refresh_seconds`` re-read the event log and,
-only when its append-only count changed (or a refresh was forced), rebuild the
-active pane; every second re-tick just the reset countdowns and "as of" ages.
+Refresh model (three timers, so the dashboard is live without pressing ``r``):
+every ``refresh_seconds`` re-read the event log and, only when its append-only
+count changed (or a refresh was forced), rebuild the active pane — the Work
+receipts included, keeping the selected receipt and its steps drill-down in
+place; every ``import_seconds`` re-import the client session logs in a
+background thread (skipped while a live ``agentacct start`` watcher already
+keeps this store fresh, and disabled by ``AGENTACCT_TUI_AUTO_IMPORT=0`` or
+``--import-every 0``); every second re-tick just the reset countdowns and
+"as of" ages. ``r`` still forces all three at once.
 
 Headless-testable with Textual's ``App.run_test()`` — see ``tests/test_tui.py``.
 """
@@ -394,6 +400,8 @@ _WINDOW_CYCLE: tuple[str, ...] = ("today", "7d", "30d", "all")
 # The trailing ranges the Usage pane's `d` key cycles: (days, label). None = all.
 _USAGE_RANGE_CYCLE: tuple[tuple[int | None, str], ...] = ((7, "7d"), (30, "30d"), (90, "90d"), (None, "all"))
 _AUTO_IMPORT_ENV = "AGENTACCT_TUI_AUTO_IMPORT"
+# Default seconds between background re-imports of the client session logs.
+DEFAULT_IMPORT_SECONDS = 30.0
 _RECEIPTS_LIMIT = 300
 _SESSIONS_LIMIT = 500
 
@@ -595,6 +603,7 @@ class AgentAcctTUI(App):
         client: str | None = None,
         window_token: str = "7d",
         refresh_seconds: float = 5.0,
+        import_seconds: float = DEFAULT_IMPORT_SECONDS,
         subagent_projects_root: Path | str | None = None,
         notice: str | None = None,
     ) -> None:
@@ -603,6 +612,11 @@ class AgentAcctTUI(App):
         self.client = client
         self.window_token = window_token
         self.refresh_seconds = max(1.0, float(refresh_seconds))
+        # Background re-import cadence for the client session logs; 0 disables.
+        # Never faster than the event-log poll: an import is a full client-log
+        # scan, so it must stay the slow timer.
+        seconds = float(import_seconds or 0.0)
+        self.import_seconds = 0.0 if seconds <= 0 else max(self.refresh_seconds, seconds)
         self.subagent_projects_root = subagent_projects_root
         # Standing caveat about the store shown, kept in the top bar all run:
         # a one-off stderr line vanishes behind the alternate screen.
@@ -719,6 +733,8 @@ class AgentAcctTUI(App):
         self.refresh_data(force=True)
         self._start_import()
         self.set_interval(self.refresh_seconds, self.refresh_data)
+        if self.import_seconds > 0:
+            self.set_interval(self.import_seconds, self._auto_import)
         self.set_interval(1.0, self._tick)
 
     # -- theme --------------------------------------------------------------- #
@@ -892,8 +908,13 @@ class AgentAcctTUI(App):
         self._snapshot = snapshot
         self._last_refresh_at = time.time()
         self._render_all()
+        # The receipts were built from the old log: rebuild them now if the Work
+        # pane is showing, otherwise lazily on the next visit.
+        self._work_built = False
         if self.current_pane == "dashboard":
             self._start_dashboard()
+        elif self.current_pane == "work":
+            self._start_work(force=True, background=True)
 
     def _render_all(self) -> None:
         try:
@@ -931,6 +952,28 @@ class AgentAcctTUI(App):
         self._render_topbar()
         self._import_usage()
 
+    def _auto_import(self) -> None:
+        """Timer: re-import the client logs unless a live watcher already does.
+
+        A running ``agentacct start`` watcher (``usage watch --refresh``) owns the
+        store and keeps it fresh on its own cadence; the event-log poll picks up
+        its writes, so a second scanner would only duplicate work."""
+
+        if self._importing or not _auto_import_enabled():
+            return
+        if self._watcher_running():
+            return
+        self._start_import()
+
+    def _watcher_running(self) -> bool:
+        try:
+            from .ingestion_health import IngestionHealthStore
+
+            watcher = IngestionHealthStore(self.store_dir).snapshot().get("watcher") or {}
+        except Exception:  # noqa: BLE001 - unknown health never blocks the import.
+            return False
+        return str(watcher.get("state") or "") == "running"
+
     @work(thread=True, exclusive=True, group="import")
     def _import_usage(self) -> None:
         from textual.worker import get_current_worker
@@ -939,7 +982,13 @@ class AgentAcctTUI(App):
         try:
             from .cli import _local_usage_import_payload
 
-            _local_usage_import_payload(store_dir=self.store_dir, client="all", estimate_costs=True)
+            # Same policy as the managed watcher (`usage watch --refresh
+            # --estimate-costs`): new sessions land, and a still-growing session's
+            # row is replaced when its totals changed — a live dashboard should
+            # not pin the current session at its first-seen totals.
+            _local_usage_import_payload(
+                store_dir=self.store_dir, client="all", estimate_costs=True, refresh=True
+            )
         except Exception:  # noqa: BLE001 - freshness is best-effort.
             pass
         if worker.is_cancelled:
@@ -1084,7 +1133,11 @@ class AgentAcctTUI(App):
 
     # -- Work: receipts list (master) + one Work Receipt (detail) ------------ #
 
-    def _start_work(self, force: bool = False) -> None:
+    def _start_work(self, force: bool = False, background: bool = False) -> None:
+        """Build (or re-render) the receipts. ``background`` is a timer-driven
+        rebuild: the current list stays on screen until the new one is ready,
+        instead of flashing the "building…" placeholder on every store change."""
+
         if self._work_built and not force:
             self._render_work_head()
             self._render_work_tabs()
@@ -1093,12 +1146,13 @@ class AgentAcctTUI(App):
         if self._work_loading and not force:
             return
         self._work_loading = True
-        try:
-            self.query_one("#work-head", Static).update(
-                f"[b {self.pal['ink']}]Work receipts[/]  [{self.pal['dim']}]building… (a few seconds)[/]"
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        if not background:
+            try:
+                self.query_one("#work-head", Static).update(
+                    f"[b {self.pal['ink']}]Work receipts[/]  [{self.pal['dim']}]building… (a few seconds)[/]"
+                )
+            except Exception:  # noqa: BLE001
+                pass
         self._build_work()
 
     @work(thread=True, exclusive=True, group="work")
@@ -1311,9 +1365,14 @@ class AgentAcctTUI(App):
             self._open_steps()
 
     def _show_receipt(self, task_id: str) -> None:
+        # Re-showing the receipt already selected (a background rebuild, or the
+        # list re-highlighting the same row) keeps the steps drill-down open and
+        # redraws it from the fresh receipt; moving to a different receipt always
+        # returns to the receipt view.
+        keep_steps = task_id == self._selected_task_id and self._work_detail_mode == "steps"
         self._selected_task_id = task_id
-        # Moving to a receipt always returns to the receipt view (out of steps).
-        self._work_detail_mode = "receipt"
+        if not keep_steps:
+            self._work_detail_mode = "receipt"
         task = self._work_by_key.get(task_id)
         pal = self.pal
         if task is None:
@@ -1350,6 +1409,8 @@ class AgentAcctTUI(App):
             self._set_card("#work-dimensions", parts["dims_title"], parts["dims"])
         except Exception:  # noqa: BLE001
             pass
+        if keep_steps:
+            self._open_steps()
         self._apply_detail_mode()
 
     def _apply_detail_mode(self) -> None:

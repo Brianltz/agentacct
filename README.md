@@ -108,7 +108,7 @@ Then remove what onboarding added. For a global install (the default): delete th
 
 ## The terminal app
 
-Prefer the terminal? `agentacct tui` is the full app in your shell — the same work receipts, evidence, and capacity the macOS app shows, keyboard-native. Tabs `1`–`4` switch between the **Dashboard** (what needs you), **Work** (receipts, each carrying a decision × evidence verdict and its full Work Receipt), **Usage** (provider capacity + recorded usage), and **Sources** (what feeds the store). `↑↓` move, `↵` opens a receipt, `/` filters, `?` lists every key, `T` toggles light/dark, `p` saves a shareable snapshot (an SVG that renders anywhere), `q` quits.
+Prefer the terminal? `agentacct tui` is the full app in your shell — the same work receipts, evidence, and capacity the macOS app shows, keyboard-native. Tabs `1`–`4` switch between the **Dashboard** (what needs you), **Work** (receipts, each carrying a decision × evidence verdict and its full Work Receipt), **Usage** (provider capacity + recorded usage), and **Sources** (what feeds the store). `↑↓` move, `↵` opens a receipt, `/` filters, `?` lists every key, `T` toggles light/dark, `p` saves a shareable snapshot (an SVG that renders anywhere), `q` quits. The view is live: it re-reads the store every few seconds and re-imports your agents' session logs in the background (`--import-every`, default 30s, unless the managed sync already does), so `r` is only needed to force it.
 
 ![agentacct tui — the Dashboard: what needs attention, live provider capacity, recent work receipts with decision × evidence, and a usage sparkline](https://raw.githubusercontent.com/mikehasa/agentacct/main/docs/assets/tui-dashboard.png)
 

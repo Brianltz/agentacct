@@ -9511,6 +9511,17 @@ def tui(
         float,
         typer.Option(help="Seconds between event-log polls (minimum 1)."),
     ] = 5.0,
+    import_every: Annotated[
+        float,
+        typer.Option(
+            "--import-every",
+            help=(
+                "Seconds between background re-imports of the client session logs "
+                "(0 disables; never faster than --refresh). Skipped automatically "
+                "while a live `agentacct start` watcher already syncs this store."
+            ),
+        ),
+    ] = 30.0,
 ) -> None:
     """Live terminal dashboard — Work Receipts, evidence, capacity, and sources, in place.
 
@@ -9521,6 +9532,11 @@ def tui(
     filters and ``[`` ``]`` cycle the status filter and ``s`` sorts (Work),
     ``d`` cycles the range (Usage), ``T`` toggles light/dark, ``r`` refreshes,
     ``?`` lists every key, ``q`` quits. Needs an interactive terminal.
+
+    The view is live: every ``--refresh`` seconds it re-reads the event log and
+    rebuilds the pane when something changed, and every ``--import-every``
+    seconds it re-imports the client session logs in the background (unless a
+    live ``agentacct start`` watcher already does). ``r`` forces both at once.
     """
     if window not in NOW_WINDOW_ALIASES:
         raise typer.BadParameter("--window must be one of: today, 7d, 30d, all")
@@ -9551,6 +9567,7 @@ def tui(
         client=effective_client,
         window_token=window,
         refresh_seconds=refresh,
+        import_seconds=import_every,
         notice=shadow_notice,
     ).run()
 

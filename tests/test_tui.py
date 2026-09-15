@@ -687,3 +687,166 @@ def test_tui_requires_interactive_terminal():
 def test_tui_rejects_bad_window():
     result = CliRunner().invoke(cli_app, ["tui", "--window", "5m"])
     assert result.exit_code != 0
+
+
+# --------------------------------------------------------------------------- #
+# live refresh: the store changes → the pane follows, without pressing `r`    #
+# --------------------------------------------------------------------------- #
+
+async def _open_work(app, pilot) -> None:
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    await pilot.press("2")
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def test_work_pane_rebuilds_when_the_store_changes(tmp_path):
+    """The event-log poll (refresh_data without force) must rebuild the Work
+    receipts when the log grew, so a section an agent records shows up on its
+    own — previously the list stayed stale until `r`."""
+
+    _seed(tmp_path)
+
+    async def scenario():
+        app = AgentAcctTUI(store_dir=tmp_path, refresh_seconds=3600)
+        async with app.run_test() as pilot:
+            await _open_work(app, pilot)
+            before = {str(s.get("title")) for s in app._work_summaries}
+            assert "Ship the auto-refresh" not in before
+
+            svc = SentinelService(tmp_path)
+            now = time.time()
+            _record_usage(svc, client="claude-code", model="claude-opus-4-8", session_id="s-new",
+                          tokens=1_000_000, updated_at=int(now - 30), cost=1.0, title="Ship the auto-refresh")
+            _record_section(svc, session="s-new", section_id="s-new-1", title="Ship the auto-refresh",
+                            status="started", at=now - 30)
+
+            app.refresh_data()  # the timer's un-forced poll
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            after = {str(s.get("title")) for s in app._work_summaries}
+            assert "Ship the auto-refresh" in after
+            # an unchanged log is a no-op: no rebuild is scheduled
+            app._work_built = True
+            app.refresh_data()
+            await pilot.pause()
+            assert app._work_built is True
+
+    _run(scenario())
+
+
+def test_store_change_keeps_the_steps_drilldown_open(tmp_path):
+    """A background rebuild must not yank the user out of a receipt's sessions &
+    steps view: the same receipt stays selected and the steps card stays up,
+    redrawn from the fresh log (the new check appears)."""
+
+    now = time.time()
+    _seed_finding_task(tmp_path, now)
+    _record_section(SentinelService(tmp_path), session="s-other", section_id="s-other-1",
+                    title="Another receipt", status="completed", at=now - 3600)
+
+    async def scenario():
+        app = AgentAcctTUI(store_dir=tmp_path, refresh_seconds=3600)
+        async with app.run_test() as pilot:
+            await _open_work(app, pilot)
+            tid = next(str(s.get("task_id")) for s in app._work_summaries
+                       if str(s.get("title")) == "Review dashboard visual regression")
+            app._show_receipt(tid)
+            app._open_steps()
+            await pilot.pause()
+            assert app._work_detail_mode == "steps"
+            assert "later-check-marker" not in Text.from_markup(app._steps_text).plain
+
+            _record_check(SentinelService(tmp_path), session="s-find", section_id="s-find-1",
+                          result="passed", at=now + 5, summary="later-check-marker")
+            app.refresh_data()
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.pause()
+            assert app._selected_task_id == tid
+            assert app._work_detail_mode == "steps"
+            assert app.query_one("#work-steps").display
+            assert "later-check-marker" in Text.from_markup(app._steps_text).plain
+
+            # moving to a different receipt still leaves the drill-down
+            other = next(str(s.get("task_id")) for s in app._work_summaries if str(s.get("task_id")) != tid)
+            app._show_receipt(other)
+            await pilot.pause()
+            assert app._work_detail_mode == "receipt"
+
+    _run(scenario())
+
+
+def test_periodic_import_runs_only_without_a_live_watcher(tmp_path, monkeypatch):
+    """The import timer re-scans the client logs itself, but defers to a running
+    `agentacct start` watcher (which already keeps the store fresh)."""
+
+    _seed(tmp_path)
+    monkeypatch.setenv("AGENTACCT_TUI_AUTO_IMPORT", "1")
+    calls: list[dict] = []
+
+    def fake_import(**kwargs):
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr("agentacct.cli._local_usage_import_payload", fake_import)
+
+    async def scenario():
+        app = AgentAcctTUI(store_dir=tmp_path, refresh_seconds=3600, import_seconds=3600)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert len(calls) == 1  # the launch import
+            # the launch/`r`/timer import mirrors the managed watcher's policy
+            assert calls[0]["refresh"] is True and calls[0]["estimate_costs"] is True
+            assert calls[0]["store_dir"] == tmp_path
+
+            monkeypatch.setattr(app, "_watcher_running", lambda: True)
+            app._auto_import()
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            assert len(calls) == 1  # deferred to the watcher
+
+            monkeypatch.setattr(app, "_watcher_running", lambda: False)
+            app._auto_import()
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert len(calls) == 2
+            assert app._importing is False
+
+    _run(scenario())
+
+
+def test_watcher_running_reads_ingestion_health(tmp_path):
+    _seed(tmp_path)
+    app = AgentAcctTUI(store_dir=tmp_path, refresh_seconds=3600)
+    assert app._watcher_running() is False  # no health state → never blocks the import
+    from agentacct.ingestion_health import IngestionHealthStore
+
+    acquired = IngestionHealthStore(tmp_path).acquire_watcher(
+        lease_id="tui-test-lease", pid=os.getpid(), importer_version="tui-test",
+        interval_seconds=60.0, scan_limit=20, sources=("claude-code",),
+    )
+    assert acquired.acquired
+    assert app._watcher_running() is True
+
+
+def test_import_cadence_is_clamped_and_optional(tmp_path):
+    assert AgentAcctTUI(store_dir=tmp_path).import_seconds == tui.DEFAULT_IMPORT_SECONDS
+    assert AgentAcctTUI(store_dir=tmp_path, import_seconds=0).import_seconds == 0.0
+    assert AgentAcctTUI(store_dir=tmp_path, import_seconds=-5).import_seconds == 0.0
+    # never faster than the event-log poll
+    assert AgentAcctTUI(store_dir=tmp_path, refresh_seconds=10, import_seconds=2).import_seconds == 10.0
+
+
+def test_tui_cli_accepts_import_every():
+    result = CliRunner().invoke(cli_app, ["tui", "--help"])
+    assert result.exit_code == 0
+    assert "--import-every" in result.output

@@ -20,6 +20,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timeline, as Markdown to paste into a PR or doc (a shared renderer the docs
   generators reuse).
 
+### Fixed
+
+- `agentacct tui` is now live without pressing `r`: the Work receipts rebuild
+  when the event log changes (they previously stayed stale until a manual
+  refresh), keeping the selected receipt and its sessions & steps drill-down in
+  place, and the client session logs are re-imported in the background every
+  `--import-every` seconds (default 30; 0 disables) unless a running
+  `agentacct start` watcher already syncs the store. The TUI's import now
+  follows the managed watcher's policy (`--refresh --estimate-costs`), so a
+  still-growing session updates instead of pinning to its first-seen totals.
+
 ### Changed
 
 - README: surface the worked examples and coverage matrix; state what agentacct
