@@ -2,19 +2,18 @@
 
 agentacct pins a store to every MCP registration by argv (``mcp serve
 --store-dir <path>``), while cwd-relative read commands (``tui`` / ``now`` /
-``limits``) pick their store by walking up from the current directory. Those
-two rules can silently disagree: a repo with a leftover ``.agent-sentinel/state``
-(from ``init`` or an old ``onboard --scope project``) makes ``tui`` read the
-project store while every session on the machine records into the global one.
-The dashboard then shows the session's usage with no work attached
-("observed", 0 joined items) and nothing says why.
+``limits``) pick their store by walking up from the current directory. A repo
+that grows its own ``.agent-sentinel/state`` (``init``, or ``onboard --scope
+project``) therefore changes what those commands show from inside it.
 
 This module reads the USER-scope registrations back — best-effort and
-read-only — so the CLI can name the store sessions write to whenever it is
-about to read from, or create, a different one. Project-scope registrations
-(``<repo>/.mcp.json``) are deliberately not consulted here: when one exists it
-points at the project store by construction, and ``mcp doctor`` already checks
-it against the resolved store.
+read-only — so ``init`` and ``onboard --scope project`` can say, BEFORE
+creating a project store on a machine that already records globally, that
+cwd-relative reads in this repo will show that store from now on. It is a
+create-time warning only: read commands stay quiet and show the store the
+walk-up resolves, exactly as documented (``--store-dir`` overrides).
+Project-scope registrations (``<repo>/.mcp.json``) are not consulted; ``mcp
+doctor`` checks those against the resolved store.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .store_resolution import StoreResolution, same_store_path
+from .store_resolution import same_store_path
 
 # Every registration key agentacct has ever written; pre-rename names stay
 # recognized forever (a legacy install still records under them).
@@ -134,35 +133,6 @@ def _distinct_store_dirs(rows: Iterable[RegisteredStore]) -> list[Path]:
 
 def _clients_text(rows: Iterable[RegisteredStore]) -> str:
     return ", ".join(f"{row.client}: {row.config_path}" for row in rows)
-
-
-def read_store_shadow_notice(
-    resolution: StoreResolution, *, command: str, home: Path | None = None
-) -> str | None:
-    """One-line notice when a read command resolved a PROJECT store that the
-    user's clients do not record into. None when there is nothing to say.
-
-    Only a project-walk-up resolution can shadow the global ledger: an explicit
-    ``--store-dir`` / env override is the user's own choice, and a global
-    fallback is already the store sessions write to.
-    """
-    if resolution.source != "project":
-        return None
-    elsewhere = registrations_elsewhere(resolution.path, home=home)
-    if not elsewhere:
-        return None
-    targets = _distinct_store_dirs(elsewhere)
-    if len(targets) == 1:
-        target = targets[0]
-        return (
-            f"Reading project store {resolution.path}. Your sessions record to {target} "
-            f"({_clients_text(elsewhere)}) — run `agentacct {command} --store-dir {target}` to see them."
-        )
-    listed = "; ".join(f"{row.store_dir} ({row.client})" for row in elsewhere)
-    return (
-        f"Reading project store {resolution.path}. Your sessions record elsewhere: {listed} — "
-        f"pass `--store-dir <path>` to `agentacct {command}` to see them."
-    )
 
 
 def project_store_create_warning(store_dir: Path | str, *, home: Path | None = None) -> list[str]:

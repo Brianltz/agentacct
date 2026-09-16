@@ -158,7 +158,7 @@ from .source_discovery import discover_usage_sources
 from . import store_merge
 from .env_compat import read_env_alias
 from .evidence_runtime import EvidenceRuntime
-from .registration_stores import project_store_create_warning, read_store_shadow_notice
+from .registration_stores import project_store_create_warning
 from .store_resolution import (
     ENV_STORE_DIR,
     StoreResolution,
@@ -676,9 +676,7 @@ def _resolve_cli_store_dir(store_dir: Path | str | None) -> StoreResolution:
     return resolution
 
 
-def _resolve_read_cli_store_dir(
-    store_dir: Path | str | None, *, command: str = "tui"
-) -> tuple[StoreResolution, str | None]:
+def _resolve_read_cli_store_dir(store_dir: Path | str | None) -> StoreResolution:
     """Resolve the store for a read-only display command (tui / now / limits).
 
     Like :func:`_resolve_cli_store_dir` but project-first-then-global: with no
@@ -686,9 +684,6 @@ def _resolve_read_cli_store_dir(
     to the machine-wide store so a global-by-default install's ``agentacct tui`` just
     works from any directory instead of exiting 2. The friendly worktree notice and
     the actionable no-store error (when there is no global store either) are kept.
-
-    Returns ``(resolution, notice)``: the notice names the store sessions write
-    to when the walk-up picked a project store they do not; stderr + returned.
     """
     try:
         resolution = resolve_read_store_dir(store_dir)
@@ -697,10 +692,7 @@ def _resolve_read_cli_store_dir(
         raise typer.Exit(2) from exc
     if resolution.worktree_remapped:
         print(f"Claude worktree detected; using the owning project store: {resolution.path}", file=sys.stderr)
-    notice = read_store_shadow_notice(resolution, command=command)
-    if notice is not None:
-        print(notice, file=sys.stderr)
-    return resolution, notice
+    return resolution
 
 
 def _resolve_dashboard_cli_store_dir(store_dir: Path | str | None) -> StoreResolution:
@@ -2869,13 +2861,18 @@ def onboard(
     console.print(f"- state: {store_dir}")
     console.print(f"- clients: {', '.join(requested_agents)}")
     console.print("- no provider keys, billing connection, or global client settings")
+    # Same rule as the global install: register the ABSOLUTE binary path. A
+    # bare "agentacct" only resolves inside the shell that ran onboarding
+    # (an activated venv), and the client launching the server does not
+    # inherit that PATH — the project entry then shadows the user-level one
+    # AND fails to start, so sessions in this repo record nowhere.
     install_receipts = init_project(
         project_dir=project_dir,
         force=False,
         agent=requested_agents,
         mcp=mcp,
         write_mcp=mcp,
-        mcp_command=None,
+        mcp_command=_resolve_absolute_mcp_command(),
         relative_store_path=False,
     ) or {}
 
@@ -5559,8 +5556,36 @@ def mcp_serve(
 
 
 def _mcp_config_store_dir_checks(project_root: Path, resolved_store: Path) -> list[dict[str, str]]:
-    """Warn-level checks for --store-dir values embedded in project MCP config."""
+    """Warn-level checks for the command and --store-dir embedded in project MCP config."""
     checks: list[dict[str, str]] = []
+
+    def _check_command(config_label: str, command: object, *, agent: str) -> None:
+        # The client spawns this command from ITS environment, not the shell
+        # that wrote the config: a bare name that only resolves inside an
+        # activated venv, or an absolute path that no longer exists, fails
+        # with ENOENT and the server silently never starts.
+        if not isinstance(command, str) or not command:
+            return
+        path = Path(command).expanduser()
+        if "/" in command:
+            # A path (absolute, or relative to the project the client launches in).
+            target = path if path.is_absolute() else project_root / path
+            launchable = target.is_file() and os.access(target, os.X_OK)
+        else:
+            launchable = shutil.which(command) is not None
+        if launchable:
+            return
+        checks.append(
+            {
+                "name": f"mcp config ({config_label})",
+                "status": "warn",
+                "details": (
+                    f"command {command!r} is not launchable from this environment (not on PATH / not a file); "
+                    f"the client will fail to start the server. Re-run: agentacct setup mcp --agent {agent} --write "
+                    f"--mcp-command {_resolve_absolute_mcp_command()}"
+                ),
+            }
+        )
 
     def _check_args(config_label: str, args: object, *, agent: str) -> None:
         if not isinstance(args, list):
@@ -5608,6 +5633,7 @@ def _mcp_config_store_dir_checks(project_root: Path, resolved_store: Path) -> li
                 server = payload.get("mcpServers", {}).get(server_key) if isinstance(payload, dict) else None
                 if isinstance(server, dict):
                     _check_args(f".mcp.json [{server_key}]", server.get("args"), agent="claude-code")
+                    _check_command(f".mcp.json [{server_key}]", server.get("command"), agent="claude-code")
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             checks.append({"name": "mcp config (.mcp.json)", "status": "warn", "details": f"unreadable config: {exc}"})
     codex_config = project_root / ".codex" / "config.toml"
@@ -5618,6 +5644,7 @@ def _mcp_config_store_dir_checks(project_root: Path, resolved_store: Path) -> li
                 server = payload.get("mcp_servers", {}).get(server_key)
                 if isinstance(server, dict):
                     _check_args(f".codex/config.toml [{server_key}]", server.get("args"), agent="codex")
+                    _check_command(f".codex/config.toml [{server_key}]", server.get("command"), agent="codex")
         except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
             checks.append({"name": "mcp config (.codex/config.toml)", "status": "warn", "details": f"unreadable config: {exc}"})
     return checks
@@ -9276,7 +9303,7 @@ def now(
     # 'all' / omitted → no client filter (matches `limits` and the dashboard).
     effective_client = None if client in (None, "all") else client
 
-    resolved_store_dir = _resolve_read_cli_store_dir(store_dir, command="now")[0].path
+    resolved_store_dir = _resolve_read_cli_store_dir(store_dir).path
     service = SentinelService(resolved_store_dir, create=False)
     events = service.list_all_events()
 
@@ -9420,7 +9447,7 @@ def limits(
     else:
         raise typer.BadParameter("--client must be one of: all, codex, claude-code")
 
-    resolved_store_dir = _resolve_read_cli_store_dir(store_dir, command="limits")[0].path
+    resolved_store_dir = _resolve_read_cli_store_dir(store_dir).path
     service = SentinelService(resolved_store_dir, create=False)
     snapshots = latest_limit_events(service.list_all_events(), client=effective_client)
 
@@ -9534,8 +9561,7 @@ def tui(
         )
         raise typer.Exit(1)
     effective_client = None if client in (None, "all") else client
-    resolution, shadow_notice = _resolve_read_cli_store_dir(store_dir, command="tui")
-    resolved_store_dir = resolution.path
+    resolved_store_dir = _resolve_read_cli_store_dir(store_dir).path
 
     try:
         from .tui import AgentAcctTUI
@@ -9551,7 +9577,6 @@ def tui(
         client=effective_client,
         window_token=window,
         refresh_seconds=refresh,
-        notice=shadow_notice,
     ).run()
 
 

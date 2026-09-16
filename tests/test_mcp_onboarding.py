@@ -906,3 +906,71 @@ def test_mcp_doctor_json_stays_valid_when_events_file_is_unreadable(tmp_path: Pa
     readability = [check for check in payload["checks"] if check["name"] == "store readability"]
     assert readability and readability[0]["status"] == "fail"
     assert "not readable" in readability[0]["details"]
+
+
+def test_onboard_project_scope_registers_the_absolute_binary_path(tmp_path: Path, monkeypatch) -> None:
+    """A bare ``agentacct`` only resolves inside the shell that ran onboarding
+    (an activated venv); the client spawning the server does not inherit that
+    PATH. Project scope must bake the absolute path like the global install."""
+    from agentacct import cli as cli_module
+    from agentacct.source_discovery import UsageSourceDiscovery
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    binary = venv_bin / "agentacct"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{venv_bin}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    source = UsageSourceDiscovery(
+        client="claude-code", display_name="Claude Code", status="found", evidence="test",
+        paths=["local-test-source"], file_count=1, session_count=1, latest_updated_at=1,
+        usage_confidence="client_reported", cost_confidence="unknown", importer="test", notes=[],
+    )
+    monkeypatch.setattr(cli_module, "discover_usage_sources", lambda: [source])
+    monkeypatch.setattr(cli_module, "_local_usage_import_payload", lambda **_: {"imported_events": 0, "refreshed_events": 0})
+    project = tmp_path / "repo"
+    project.mkdir()
+
+    result = runner.invoke(
+        app,
+        ["onboard", "--scope", "project", "--project-dir", str(project), "--agent", "claude-code", "--no-start", "-y"],
+    )
+
+    assert result.exit_code == 0, result.output
+    config = json.loads((project / ".mcp.json").read_text())
+    assert config["mcpServers"]["agentacct"]["command"] == str(binary)
+
+
+def test_mcp_doctor_warns_when_the_registered_command_is_not_launchable(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "repo"
+    (project / ".git").mkdir(parents=True)
+    store = project / ".agent-sentinel" / "state"
+    store.mkdir(parents=True)
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"agentacct": {"command": "agentacct-not-on-path", "args": ["mcp", "serve", "--store-dir", str(store)]}}})
+    )
+    # Project walk-up (not the suite's env store) so doctor inspects .mcp.json.
+    monkeypatch.delenv("AGENT_CHRONICLE_STORE_DIR", raising=False)
+    monkeypatch.chdir(project)
+
+    result = runner.invoke(app, ["mcp", "doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    warnings = [c for c in json.loads(result.output)["checks"] if c["name"] == "mcp config (.mcp.json [agentacct])" and c["status"] == "warn"]
+    assert len(warnings) == 1, result.output
+    assert "not launchable" in warnings[0]["details"] and "--mcp-command" in warnings[0]["details"]
+
+    # An absolute, existing command passes.
+    binary = tmp_path / "bin" / "agentacct"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"agentacct": {"command": str(binary), "args": ["mcp", "serve", "--store-dir", str(store)]}}})
+    )
+    result = runner.invoke(app, ["mcp", "doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    names = [c["name"] for c in json.loads(result.output)["checks"] if c["status"] == "warn" and "mcp config" in c["name"]]
+    assert names == []

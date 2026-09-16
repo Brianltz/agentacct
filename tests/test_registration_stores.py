@@ -1,6 +1,7 @@
-"""The "usage but no work" trap: a project store that user-scope clients do not
-record into. These tests pin the read-back of user-scope MCP registrations and
-the notices the CLI prints when it reads from, or creates, such a store.
+"""Read-back of user-scope MCP registrations, and the create-time warning
+``init`` / ``onboard --scope project`` print before adding a project store on a
+machine that already records globally. Read commands (tui / now / limits) stay
+quiet and show the store the walk-up resolves.
 
 HOME is redirected to a tmp dir so nothing here reads the real ~/.claude.json
 or ~/.codex/config.toml.
@@ -15,11 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from agentacct.cli import app
-from agentacct.registration_stores import (
-    read_store_shadow_notice,
-    user_scope_registered_stores,
-)
-from agentacct.store_resolution import StoreResolution
+from agentacct.registration_stores import project_store_create_warning, user_scope_registered_stores
 
 
 @pytest.fixture
@@ -56,12 +53,6 @@ def _global_store(home: Path) -> Path:
     store = home / ".local" / "state" / "agentacct" / "state"
     store.mkdir(parents=True)
     return store
-
-
-def _project_resolution(project: Path) -> StoreResolution:
-    return StoreResolution(
-        path=project / ".agent-sentinel" / "state", source="project", project_root=project, worktree_remapped=False
-    )
 
 
 # --- read-back -------------------------------------------------------------
@@ -102,45 +93,6 @@ def test_missing_malformed_and_relative_registrations_contribute_nothing(tmp_pat
     assert user_scope_registered_stores(home=home) == []
 
 
-# --- notices ----------------------------------------------------------------
-
-
-def test_shadow_notice_names_the_recording_store_and_the_flag(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    store = _global_store(home)
-    _write_claude_registration(home, store)
-    project = tmp_path / "repo"
-
-    notice = read_store_shadow_notice(_project_resolution(project), command="tui", home=home)
-
-    assert notice is not None
-    assert f"Reading project store {project / '.agent-sentinel' / 'state'}" in notice
-    assert f"Your sessions record to {store}" in notice
-    assert f"agentacct tui --store-dir {store}" in notice
-
-
-def test_shadow_notice_is_silent_when_registrations_match_or_are_absent(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    project = tmp_path / "repo"
-    resolution = _project_resolution(project)
-    # No registrations at all: nothing to say.
-    assert read_store_shadow_notice(resolution, command="tui", home=home) is None
-    # Registered against the very project store being read: nothing to say.
-    _write_claude_registration(home, resolution.path)
-    assert read_store_shadow_notice(resolution, command="tui", home=home) is None
-
-
-def test_shadow_notice_only_applies_to_project_walk_up(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    _write_claude_registration(home, _global_store(home))
-    # An explicit --store-dir is the user's own choice: never second-guessed.
-    resolution = StoreResolution(path=tmp_path / "chosen", source="flag", project_root=None, worktree_remapped=False)
-    assert read_store_shadow_notice(resolution, command="now", home=home) is None
-
-
 # --- CLI wiring -------------------------------------------------------------
 
 
@@ -150,25 +102,6 @@ def _seed_project(root: Path) -> Path:
     state = root / ".agent-sentinel" / "state"
     state.mkdir(parents=True)
     return state
-
-
-def test_now_prints_notice_on_stderr_and_keeps_json_stdout_clean(
-    tmp_path: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = _global_store(isolated_home)
-    _write_claude_registration(isolated_home, store)
-    project = tmp_path / "repo"
-    _seed_project(project)
-    monkeypatch.delenv("AGENTACCT_STORE_DIR", raising=False)
-    monkeypatch.delenv("AGENT_CHRONICLE_STORE_DIR", raising=False)
-    monkeypatch.chdir(project)
-
-    result = CliRunner().invoke(app, ["now", "--json"])
-
-    assert result.exit_code == 0, result.output
-    json.loads(result.stdout)  # stdout is still machine-parseable
-    assert "Your sessions record to" in result.stderr
-    assert f"agentacct now --store-dir {store}" in result.stderr
 
 
 def test_init_warns_before_creating_a_project_store_on_a_global_install(
@@ -193,12 +126,29 @@ def test_init_warns_before_creating_a_project_store_on_a_global_install(
     assert "already records to" not in again.output
 
 
-def test_tui_passes_notice_through_to_the_app(
-    tmp_path: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+# --- create-time warning ----------------------------------------------------
+
+
+def test_create_warning_names_the_recording_store(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    store = _global_store(home)
+    _write_claude_registration(home, store)
+    project_store = tmp_path / "repo" / ".agent-sentinel" / "state"
+
+    lines = project_store_create_warning(project_store, home=home)
+
+    assert lines and "already records to" in lines[0] and str(store) in lines[0]
+    # Registered against the very store about to be created, or nothing registered: silent.
+    assert project_store_create_warning(store, home=home) == []
+    assert project_store_create_warning(project_store, home=tmp_path / "empty") == []
+
+
+def test_now_reads_the_walked_up_project_store_quietly(
+    tmp_path: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pytest.importorskip("textual")
-    from agentacct import cli as cli_module
-    from agentacct import tui as tui_module
+    """Read commands show the store the walk-up resolves and say nothing about
+    where sessions record: that is a create-time concern (init / onboard)."""
 
     store = _global_store(isolated_home)
     _write_claude_registration(isolated_home, store)
@@ -207,26 +157,9 @@ def test_tui_passes_notice_through_to_the_app(
     monkeypatch.delenv("AGENTACCT_STORE_DIR", raising=False)
     monkeypatch.delenv("AGENT_CHRONICLE_STORE_DIR", raising=False)
     monkeypatch.chdir(project)
-    seen: dict[str, object] = {}
 
-    class _FakeApp:
-        def __init__(self, **kwargs: object) -> None:
-            seen.update(kwargs)
+    result = CliRunner().invoke(app, ["now", "--json"])
 
-        def run(self) -> None:
-            return None
-
-    monkeypatch.setattr(tui_module, "AgentAcctTUI", _FakeApp)
-    # The command refuses to run without a terminal, and CliRunner swaps in
-    # pipes at invoke time, so call the command function directly with the tty
-    # check answered the way a real terminal would.
-    monkeypatch.setattr(cli_module.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(cli_module.sys.stdout, "isatty", lambda: True)
-
-    cli_module.tui(store_dir=None, window="7d", client=None, refresh=5.0)
-
-    assert seen["store_dir"] == project / ".agent-sentinel" / "state"
-    assert isinstance(seen["notice"], str) and str(store) in seen["notice"]
-    assert "Your sessions record to" in capsys.readouterr().err
-
-
+    assert result.exit_code == 0, result.output
+    json.loads(result.stdout)
+    assert "record" not in result.stderr
