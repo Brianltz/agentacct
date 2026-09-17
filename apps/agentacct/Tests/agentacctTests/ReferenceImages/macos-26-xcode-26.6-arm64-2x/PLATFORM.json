@@ -18,5 +18,5 @@
   },
   "recorded_at_commit": "ea75e2d",
   "recorded_at_utc": "unknown",
-  "note": "compared_axes is the gate. recorded_on is provenance only and is never compared; drift inside macOS 26.x is absorbed by the measured tolerance in Tests/agentacctTests/Support/VisualSnapshotHarness.swift. This file was written by hand when the directory was renamed from macos-26.6-25G72-xcode-26.6-17F113-arm64-2x: the images themselves are the untouched originals recorded at ea75e2d, so recorded_at_utc is not recoverable and is left honest rather than invented. A subsequent `record` rewrites this file from the observed host."
+  "note": "compared_axes is the gate. recorded_on is provenance only and is never compared; drift inside macOS 26.x is absorbed by VisualSnapshotTolerance.crossMinorRenderingNoise, whose measured basis is documented in Tests/agentacctTests/Support/VisualSnapshotHarness.swift. Written by hand when the directory was renamed from macos-26.6-25G72-xcode-26.6-17F113-arm64-2x: these PNGs are the untouched originals recorded at ea75e2d, so recorded_at_utc is not recoverable and is left as 'unknown' rather than invented. A later `record` on a real host rewrites this file from what it observes."
 }
