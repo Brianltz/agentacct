@@ -1,0 +1,22 @@
+{
+  "platform_id": "macos-26-xcode-26.6-arm64-2x",
+  "compared_axes": {
+    "macos_major": "26",
+    "xcode_version": "26.6",
+    "architecture": "arm64"
+  },
+  "recorded_on": {
+    "macos_product_version": "26.6",
+    "macos_build_version": "25G72",
+    "xcode_version": "26.6",
+    "xcode_build_version": "17F113",
+    "architecture": "arm64",
+    "raster_scale": "2x",
+    "tz": "UTC",
+    "lang": "en_US.UTF-8",
+    "lc_all": "en_US.UTF-8"
+  },
+  "recorded_at_commit": "ea75e2d",
+  "recorded_at_utc": "unknown",
+  "note": "compared_axes is the gate. recorded_on is provenance only and is never compared; drift inside macOS 26.x is absorbed by the measured tolerance in Tests/agentacctTests/Support/VisualSnapshotHarness.swift. This file was written by hand when the directory was renamed from macos-26.6-25G72-xcode-26.6-17F113-arm64-2x: the images themselves are the untouched originals recorded at ea75e2d, so recorded_at_utc is not recoverable and is left honest rather than invented. A subsequent `record` rewrites this file from the observed host."
+}
