@@ -57,6 +57,12 @@ enum Fmt {
         return nil
     }
 
+    /// "1 session" / "3 sessions": every user-facing count carries a
+    /// correctly numbered noun. Pass `plural` for irregular nouns.
+    static func count(_ n: Int, _ singular: String, _ plural: String? = nil) -> String {
+        "\(n) \(n == 1 ? singular : (plural ?? singular + "s"))"
+    }
+
     /// Human phrasing for a cost-confidence key (raw keys stay in payloads).
     static func costConfidenceLabel(_ confidence: String?) -> String? {
         switch confidence {

@@ -108,7 +108,7 @@ func receiptOutcomeSummary(_ dim: ReceiptOutcomeDim) -> String {
 /// total is named explicitly so an older or partial payload never reads as a
 /// measured zero.
 func receiptCheckSummary(total: Int?, passed: Int?, failed: Int?) -> String {
-    var parts = [total.map { "\($0) checks" } ?? "check total not reported"]
+    var parts = [total.map { Fmt.count($0, "check") } ?? "check total not reported"]
     if let passed { parts.append("\(passed) passed") }
     if let failed { parts.append("\(failed) failed") }
     return parts.joined(separator: " · ")

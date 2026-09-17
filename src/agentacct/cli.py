@@ -39,6 +39,7 @@ from rich.markup import escape as _rich_escape
 from rich.table import Table
 
 from . import version as version_info
+from .plural import count_noun
 from .activation import ActivationStateError, ActivationStateStore, RuntimeManager, RuntimeManagerError
 from . import autostart as autostart_mod
 from .autostart import AutostartError
@@ -10019,10 +10020,10 @@ def _render_receipt_text(receipt: dict[str, Any]) -> None:
 
     actions = dims.get("actions", {})
     actions_summary = _receipt_category_text(actions.get("tool_category_counts") or {})
-    actions_summary += f"  · touched {int(actions.get('touched_file_count') or 0)} file(s)"
+    actions_summary += f"  · touched {count_noun(int(actions.get('touched_file_count') or 0), 'file')}"
     _command_count = int(actions.get("command_count") or 0)
     if _command_count:
-        actions_summary += f"  · ran {_command_count} command(s)"
+        actions_summary += f"  · ran {count_noun(int(_command_count), 'command')}"
     names_preview = actions.get("tool_names_preview") or []
     if names_preview:
         # The SPECIFIC tools/connectors the agent used (most-used first). Names are
