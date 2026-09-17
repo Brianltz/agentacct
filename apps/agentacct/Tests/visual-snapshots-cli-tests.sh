@@ -170,8 +170,17 @@ expected_all+='^agentacctTests\.SettingsVisualRegressionTests/'
   || fail "verify did not combine all selected suites into one release test process"
 
 : > "$AGENTACCT_FAKE_SWIFT_LOG"
-CI=false "$app_dir/Scripts/visual-snapshots" record \
+# `record` writes PNGs and PLATFORM.json into the reference root. Point it at a
+# scratch root: writing into the committed references would leave the working
+# tree dirty, and packaging refuses to stamp a frozen CLI from a dirty tree, so
+# this test would fail a later and entirely unrelated job.
+record_root="$test_dir/reference-root"
+mkdir -p "$record_root"
+CI=false AGENTACCT_REFERENCE_ROOT="$record_root" \
+  "$app_dir/Scripts/visual-snapshots" record \
   "$test_dir/TestFiles/DashboardVisualRegressionTests.swift" >/dev/null
+[[ -f "$record_root/$platform_id/PLATFORM.json" ]] \
+  || fail "record did not write provenance beside the references it recorded"
 expected_record="record|1|$platform_id|release|^agentacctTests\\.DashboardVisualRegressionTests/"
 expected_record+=$'\n'
 expected_record+="verify|1|$platform_id|release|^agentacctTests\\.DashboardVisualRegressionTests/"

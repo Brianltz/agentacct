@@ -33,7 +33,12 @@ expected_raster_scale="2x"
 platform_id="macos-$expected_os_major"
 platform_id+="-xcode-$expected_xcode_version"
 platform_id+="-$expected_architecture-$expected_raster_scale"
-reference_root="$app_dir/Tests/agentacctTests/ReferenceImages"
+# Overridable so the CLI tests can exercise `record` — which writes both PNGs
+# and PLATFORM.json — without touching the committed references. A test that
+# writes into the repository leaves the tree dirty, and packaging refuses to
+# stamp a frozen CLI from a dirty tree, so an un-hermetic test here fails a
+# later, unrelated job.
+reference_root="${AGENTACCT_REFERENCE_ROOT:-$app_dir/Tests/agentacctTests/ReferenceImages}"
 reference_dir="$reference_root/$platform_id"
 provenance_file="$reference_dir/PLATFORM.json"
 discovered_file=""
